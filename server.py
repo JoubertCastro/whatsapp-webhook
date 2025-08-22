@@ -26,7 +26,8 @@ def init_db():
             id SERIAL PRIMARY KEY,
             data_hora TIMESTAMP,
             remetente TEXT,
-            mensagem TEXT
+            mensagem TEXT,
+            msg_id TEXT
         );
     """)
     
@@ -53,13 +54,13 @@ def ajustar_timestamp(ts: str):
     except Exception:
         return datetime.now(timezone.utc) - timedelta(hours=3)
 
-def salvar_mensagem(remetente, mensagem, timestamp=None):
+def salvar_mensagem(remetente, mensagem, msg_id=None, timestamp=None):
     data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=3)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO mensagens (data_hora, remetente, mensagem) VALUES (%s, %s, %s)",
-        (data_hora, remetente, mensagem)
+        "INSERT INTO mensagens (data_hora, remetente, mensagem, msg_id) VALUES (%s, %s, %s, %s)",
+        (data_hora, remetente, mensagem, msg_id)
     )
     conn.commit()
     cur.close()
@@ -103,13 +104,10 @@ def webhook():
         if "messages" in value:
             for msg in value.get("messages", []):
                 remetente = msg.get("from", "desconhecido")
+                msg_id = msg.get("id")
                 tipo = msg.get("type")
-                texto = None
-                if tipo == "text":
-                    texto = msg.get("text", {}).get("body")
-                else:
-                    texto = f"[{tipo}]"
-                salvar_mensagem(remetente, texto, msg.get("timestamp"))
+                texto = msg.get("text", {}).get("body") if tipo == "text" else f"[{tipo}]"
+                salvar_mensagem(remetente, texto, msg_id, msg.get("timestamp"))
 
         # Status de mensagens enviadas
         if "statuses" in value:
