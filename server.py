@@ -20,14 +20,17 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
     
-    # tabela mensagens recebidas
+    # tabela mensagens recebidas e cliques de botão
     cur.execute("""
         CREATE TABLE IF NOT EXISTS mensagens (
             id SERIAL PRIMARY KEY,
             data_hora TIMESTAMP,
             remetente TEXT,
             mensagem TEXT,
-            msg_id TEXT
+            direcao TEXT,
+            nome TEXT,
+            msg_id TEXT,
+            raw JSONB
         );
     """)
     
@@ -54,13 +57,13 @@ def ajustar_timestamp(ts: str):
     except Exception:
         return datetime.now(timezone.utc) - timedelta(hours=3)
 
-def salvar_mensagem(remetente, mensagem, msg_id=None, timestamp=None):
+def salvar_mensagem(remetente, mensagem, msg_id=None, nome=None, timestamp=None, raw=None):
     data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=3)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO mensagens (data_hora, remetente, mensagem, msg_id) VALUES (%s, %s, %s, %s)",
-        (data_hora, remetente, mensagem, msg_id)
+        "INSERT INTO mensagens (data_hora, remetente, mensagem, direcao, nome, msg_id, raw) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (data_hora, remetente, mensagem, "in", nome, msg_id, json.dumps(raw) if raw else None)
     )
     conn.commit()
     cur.close()
@@ -106,8 +109,20 @@ def webhook():
                 remetente = msg.get("from", "desconhecido")
                 msg_id = msg.get("id")
                 tipo = msg.get("type")
-                texto = msg.get("text", {}).get("body") if tipo == "text" else f"[{tipo}]"
-                salvar_mensagem(remetente, texto, msg_id, msg.get("timestamp"))
+                texto = None
+
+                if tipo == "text":
+                    texto = msg.get("text", {}).get("body")
+                elif tipo == "button":
+                    botao = msg.get("button", {})
+                    texto = f"{botao.get('text')} (payload: {botao.get('payload')})"
+                else:
+                    texto = f"[{tipo}]"
+
+                # nome do contato
+                nome = value.get("contacts", [{}])[0].get("profile", {}).get("name")
+
+                salvar_mensagem(remetente, texto, msg_id=msg_id, nome=nome, timestamp=msg.get("timestamp"), raw=msg)
 
         # Status de mensagens enviadas
         if "statuses" in value:
