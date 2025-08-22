@@ -1,5 +1,2 @@
 flask
-gunicorn
-pydrive2
-oauth2client
 psycopg2-binary
