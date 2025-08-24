@@ -178,7 +178,7 @@ def cadastrar():
         cur.execute(
             """
             INSERT INTO usuarios (nome, email, senha, criado_em)
-            VALUES (%s, %s, %s, (now() AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'))
+            VALUES (%s, %s, %s, (now() AT TIME ZONE 'America/Sao_Paulo'))
             RETURNING id, criado_em
             """,
             (nome, email, generate_password_hash(senha))
