@@ -7,8 +7,10 @@ import os
 
 # === NOVO (LOGIN) ===
 from werkzeug.security import generate_password_hash, check_password_hash
+from flask_cors import CORS  # ✅ Importa o CORS
 
 app = Flask(__name__)
+CORS(app)  # ✅ Ativa CORS para todas as rotas
 
 # ---------- Config ----------
 DATABASE_URL = os.getenv(
@@ -22,11 +24,9 @@ def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 def init_db():
-    """Cria tabelas se não existirem"""
     conn = get_conn()
     cur = conn.cursor()
 
-    # tabela mensagens recebidas e cliques de botão
     cur.execute("""
         CREATE TABLE IF NOT EXISTS mensagens (
             id SERIAL PRIMARY KEY,
@@ -40,7 +40,6 @@ def init_db():
         );
     """)
 
-    # tabela status das mensagens enviadas
     cur.execute("""
         CREATE TABLE IF NOT EXISTS status_mensagens (
             id SERIAL PRIMARY KEY,
@@ -52,7 +51,6 @@ def init_db():
         );
     """)
 
-    # === NOVO (LOGIN) === tabela de usuários
     cur.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id SERIAL PRIMARY KEY,
@@ -69,7 +67,6 @@ def init_db():
     conn.close()
 
 def ajustar_timestamp(ts: str):
-    """Converte timestamp do WhatsApp (Unix UTC) para datetime GMT-3"""
     try:
         return datetime.fromtimestamp(int(ts), tz=timezone.utc) - timedelta(hours=3)
     except Exception:
@@ -101,7 +98,6 @@ def salvar_status(msg_id, recipient_id, status, raw, timestamp=None):
     cur.close()
     conn.close()
 
-# Inicializa banco
 init_db()
 
 # ---------- Webhook ----------
@@ -123,7 +119,6 @@ def webhook():
         changes = entry.get("changes", [])[0]
         value = changes.get("value", {})
 
-        # Mensagens recebidas
         for msg in value.get("messages", []):
             remetente = msg.get("from", "desconhecido")
             msg_id = msg.get("id")
@@ -142,7 +137,6 @@ def webhook():
 
             salvar_mensagem(remetente, texto, msg_id=msg_id, nome=nome, timestamp=msg.get("timestamp"), raw=msg)
 
-        # Status de mensagens enviadas
         for st in value.get("statuses", []):
             salvar_status(
                 st.get("id"),
@@ -224,7 +218,6 @@ def login():
     if not check_password_hash(user["senha"], senha):
         return jsonify({"ok": False, "erro": "credenciais inválidas"}), 401
 
-    # Retorna dados básicos
     return jsonify({
         "ok": True,
         "user": {
