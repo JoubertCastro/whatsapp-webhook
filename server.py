@@ -68,9 +68,9 @@ def init_db():
 
 def ajustar_timestamp(ts: str):
     try:
-        return datetime.fromtimestamp(int(ts), tz=timezone.utc) - timedelta(hours=6)
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc) - timedelta(hours=3)
     except Exception:
-        return datetime.now(timezone.utc) - timedelta(hours=6)
+        return datetime.now(timezone.utc) - timedelta(hours=3)
 
 def salvar_mensagem(remetente, mensagem, msg_id=None, nome=None, timestamp=None, raw=None):
     data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=3)
@@ -176,9 +176,14 @@ def cadastrar():
             return jsonify({"ok": False, "erro": "email já cadastrado"}), 409
 
         cur.execute(
-            "INSERT INTO usuarios (nome, email, senha) VALUES (%s, %s, %s) RETURNING id, criado_em",
+            """
+            INSERT INTO usuarios (nome, email, senha, criado_em)
+            VALUES (%s, %s, %s, (now() AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'))
+            RETURNING id, criado_em
+            """,
             (nome, email, generate_password_hash(senha))
         )
+
         row = cur.fetchone()
         conn.commit()
         return jsonify({"ok": True, "id": row["id"], "criado_em": row["criado_em"]})
