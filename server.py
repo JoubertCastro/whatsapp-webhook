@@ -240,7 +240,7 @@ def listar_usuarios():
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT id, nome, email,criado_em FROM usuarios WHERE ativo = true ORDER BY id")
+        cur.execute("SELECT id, nome, email,ativo,criado_em FROM usuarios WHERE ativo = true ORDER BY id")
         usuarios = cur.fetchall()
         return jsonify(usuarios)
     except Exception as e:
