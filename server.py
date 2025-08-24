@@ -240,7 +240,7 @@ def listar_usuarios():
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT id, nome, email,criado_em FROM usuarios WHERE ativo = 1 ORDER BY id")
+        cur.execute("SELECT id, nome, email,criado_em FROM usuarios WHERE ativo = true ORDER BY id")
         usuarios = cur.fetchall()
         return jsonify(usuarios)
     except Exception as e:
@@ -264,7 +264,7 @@ def editar_usuario(id):
     cur = conn.cursor()
     try:
         cur.execute(
-            "UPDATE usuarios SET nome = %s, email = %s, senha = %s WHERE id = %s AND ativo = 1",
+            "UPDATE usuarios SET nome = %s, email = %s, senha = %s WHERE id = %s AND ativo = true",
             (nome, email, generate_password_hash(senha), id)
         )
         conn.commit()
@@ -282,7 +282,7 @@ def excluir_usuario(id):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute("UPDATE usuarios SET ativo = 0 WHERE id = %s", (id,))
+        cur.execute("UPDATE usuarios SET ativo = false WHERE id = %s", (id,))
         conn.commit()
         return jsonify({"ok": True})
     except Exception as e:
