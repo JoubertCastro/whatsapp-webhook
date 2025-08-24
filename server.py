@@ -68,12 +68,12 @@ def init_db():
 
 def ajustar_timestamp(ts: str):
     try:
-        return datetime.fromtimestamp(int(ts), tz=timezone.utc) - timedelta(hours=3)
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc) - timedelta(hours=0)
     except Exception:
-        return datetime.now(timezone.utc) - timedelta(hours=3)
+        return datetime.now(timezone.utc) - timedelta(hours=0)
 
 def salvar_mensagem(remetente, mensagem, msg_id=None, nome=None, timestamp=None, raw=None):
-    data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=3)
+    data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=6)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -86,7 +86,7 @@ def salvar_mensagem(remetente, mensagem, msg_id=None, nome=None, timestamp=None,
     conn.close()
 
 def salvar_status(msg_id, recipient_id, status, raw, timestamp=None):
-    data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=3)
+    data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=6)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
