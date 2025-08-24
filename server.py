@@ -228,6 +228,66 @@ def login():
         }
     })
 
+# === NOVO (ADMINISTRAÇÃO DE USUÁRIOS) ===
+
+@app.route("/api/usuarios", methods=["GET"])
+def listar_usuarios():
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, nome, email FROM usuarios WHERE ativo = TRUE ORDER BY id")
+        usuarios = cur.fetchall()
+        return jsonify(usuarios)
+    except Exception as e:
+        print("❌ Erro /api/usuarios [GET]:", e)
+        return jsonify({"ok": False, "erro": "erro ao listar usuários"}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+@app.route("/api/usuarios/<int:id>", methods=["PUT"])
+def editar_usuario(id):
+    data = request.get_json(silent=True) or {}
+    nome = (data.get("nome") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    senha = data.get("senha") or ""
+
+    if not nome or not email or not senha:
+        return jsonify({"ok": False, "erro": "nome, email e senha são obrigatórios"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE usuarios SET nome = %s, email = %s, senha = %s WHERE id = %s AND ativo = TRUE",
+            (nome, email, generate_password_hash(senha), id)
+        )
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        print("❌ Erro /api/usuarios/<id> [PUT]:", e)
+        return jsonify({"ok": False, "erro": "erro ao editar usuário"}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+@app.route("/api/usuarios/<int:id>", methods=["DELETE"])
+def excluir_usuario(id):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("UPDATE usuarios SET ativo = FALSE WHERE id = %s", (id,))
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        print("❌ Erro /api/usuarios/<id> [DELETE]:", e)
+        return jsonify({"ok": False, "erro": "erro ao excluir usuário"}), 500
+    finally:
+        cur.close()
+        conn.close()
+
 # ---------- Run ----------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
