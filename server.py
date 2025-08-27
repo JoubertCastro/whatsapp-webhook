@@ -36,6 +36,8 @@ def init_db():
             direcao TEXT,
             nome TEXT,
             msg_id TEXT,
+            phone_number_id TEXT,          -- ✅ novo campo
+            display_phone_number TEXT,     -- ✅ novo campo
             raw JSONB
         );
     """)
@@ -47,6 +49,8 @@ def init_db():
             msg_id TEXT,
             recipient_id TEXT,
             status TEXT,
+            phone_number_id TEXT,          -- ✅ novo campo
+            display_phone_number TEXT,     -- ✅ novo campo
             raw JSONB
         );
     """)
@@ -72,31 +76,39 @@ def ajustar_timestamp(ts: str):
     except Exception:
         return datetime.now(timezone.utc) - timedelta(hours=3)
 
-def salvar_mensagem(remetente, mensagem, msg_id=None, nome=None, timestamp=None, raw=None):
+def salvar_mensagem(remetente, mensagem, msg_id=None, nome=None, timestamp=None,
+                    raw=None, phone_number_id=None, display_phone_number=None):
     data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=3)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO mensagens (data_hora, remetente, mensagem, direcao, nome, msg_id, raw) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-        (data_hora, remetente, mensagem, "in", nome, msg_id, json.dumps(raw) if raw else None)
+        "INSERT INTO mensagens (data_hora, remetente, mensagem, direcao, nome, msg_id, phone_number_id, display_phone_number, raw) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (data_hora, remetente, mensagem, "in", nome, msg_id,
+         phone_number_id, display_phone_number,
+         json.dumps(raw) if raw else None)
     )
     conn.commit()
     cur.close()
     conn.close()
 
-def salvar_status(msg_id, recipient_id, status, raw, timestamp=None):
+
+def salvar_status(msg_id, recipient_id, status, raw, timestamp=None,
+                  phone_number_id=None, display_phone_number=None):
     data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=3)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO status_mensagens (data_hora, msg_id, recipient_id, status, raw) "
-        "VALUES (%s, %s, %s, %s, %s)",
-        (data_hora, msg_id, recipient_id, status, json.dumps(raw))
+        "INSERT INTO status_mensagens (data_hora, msg_id, recipient_id, status, phone_number_id, display_phone_number, raw) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (data_hora, msg_id, recipient_id, status,
+         phone_number_id, display_phone_number,
+         json.dumps(raw))
     )
     conn.commit()
     cur.close()
     conn.close()
+
 
 init_db()
 
