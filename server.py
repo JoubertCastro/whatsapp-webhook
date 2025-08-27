@@ -131,6 +131,11 @@ def webhook():
         changes = entry.get("changes", [])[0]
         value = changes.get("value", {})
 
+        # ✅ captura os campos de metadata
+        phone_number_id = value.get("metadata", {}).get("phone_number_id")
+        display_phone_number = value.get("metadata", {}).get("display_phone_number")
+
+        # --- Mensagens recebidas ---
         for msg in value.get("messages", []):
             remetente = msg.get("from", "desconhecido")
             msg_id = msg.get("id")
@@ -147,15 +152,27 @@ def webhook():
 
             nome = value.get("contacts", [{}])[0].get("profile", {}).get("name")
 
-            salvar_mensagem(remetente, texto, msg_id=msg_id, nome=nome, timestamp=msg.get("timestamp"), raw=msg)
+            salvar_mensagem(
+                remetente,
+                texto,
+                msg_id=msg_id,
+                nome=nome,
+                timestamp=msg.get("timestamp"),
+                raw=msg,
+                phone_number_id=phone_number_id,
+                display_phone_number=display_phone_number
+            )
 
+        # --- Status de mensagens ---
         for st in value.get("statuses", []):
             salvar_status(
                 st.get("id"),
                 st.get("recipient_id"),
                 st.get("status"),
                 st,
-                st.get("timestamp")
+                st.get("timestamp"),
+                phone_number_id=phone_number_id,
+                display_phone_number=display_phone_number
             )
 
     except Exception as e:
