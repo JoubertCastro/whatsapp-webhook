@@ -322,6 +322,32 @@ def excluir_usuario(id):
         cur.close()
         conn.close()
 
+@app.route("/api/status", methods=["GET"])
+def listar_status():
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT data_hora, recipient_id, status, display_phone_number
+            FROM (
+                SELECT data_hora, recipient_id, status, display_phone_number,
+                       row_number() OVER (PARTITION BY recipient_id, msg_id, display_phone_number ORDER BY data_hora DESC) AS atual
+                FROM status_mensagens
+            ) tb
+            WHERE atual = 1
+            ORDER BY data_hora DESC
+        """)
+        rows = cur.fetchall()
+        return jsonify(rows)
+    except Exception as e:
+        print("❌ Erro /api/status:", e)
+        return jsonify({"ok": False, "erro": "erro ao buscar status"}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+
 # ---------- Run ----------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
