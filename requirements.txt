@@ -1,4 +1,7 @@
 flask
+gunicorn
 psycopg2-binary
-werkzeug
+requests
 flask-cors
+pydrive2
+oauth2client

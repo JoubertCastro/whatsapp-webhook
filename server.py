@@ -66,10 +66,37 @@ def init_db():
         );
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS envios (
+            id SERIAL PRIMARY KEY,
+            nome_disparo TEXT NOT NULL,
+            grupo_trabalho TEXT,
+            criado_em TIMESTAMP DEFAULT NOW(),
+            modo_envio TEXT,
+            data_hora_agendamento TIMESTAMP,
+            intervalo_msg INT,
+            tamanho_lote INT,
+            intervalo_lote INT,
+            template JSONB
+        );
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS envios_analitico (
+            id SERIAL PRIMARY KEY,
+            envio_id INT REFERENCES envios(id) ON DELETE CASCADE,
+            nome_disparo TEXT,
+            grupo_trabalho TEXT,
+            data_hora TIMESTAMP DEFAULT NOW(),
+            telefone TEXT,
+            conteudo TEXT
+        );
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
-
+    
 def ajustar_timestamp(ts: str):
     try:
         return datetime.fromtimestamp(int(ts), tz=timezone.utc) - timedelta(hours=3)
@@ -342,6 +369,50 @@ def listar_status():
     except Exception as e:
         print("❌ Erro /api/status:", e)
         return jsonify({"ok": False, "erro": "erro ao buscar status"}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.route("/api/envios", methods=["POST"])
+def criar_envio():
+    data = request.get_json(silent=True) or {}
+    nome = data.get("nome_disparo")
+    grupo = data.get("grupo_trabalho")
+    modo = data.get("modo_envio")
+    agendamento = data.get("data_hora_agendamento")
+    intervalo_msg = data.get("intervalo_msg")
+    tamanho_lote = data.get("tamanho_lote")
+    intervalo_lote = data.get("intervalo_lote")
+    contatos = data.get("contatos", [])
+
+    if not nome or not grupo:
+        return jsonify({"ok": False, "erro": "nome_disparo e grupo_trabalho são obrigatórios"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO envios (nome_disparo, grupo_trabalho, modo_envio, data_hora_agendamento,
+                                intervalo_msg, tamanho_lote, intervalo_lote, template)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
+        """, (nome, grupo, modo, agendamento, intervalo_msg, tamanho_lote, intervalo_lote,
+            json.dumps(data.get("template"))))
+        envio_id = cur.fetchone()["id"]
+
+        for c in contatos:
+            cur.execute("""
+                INSERT INTO envios_analitico (envio_id, nome_disparo, grupo_trabalho, telefone, conteudo)
+                VALUES (%s,%s,%s,%s,%s)
+            """, (envio_id, nome, grupo, c.get("telefone"), c.get("conteudo")))
+
+        conn.commit()
+        return jsonify({"ok": True, "id": envio_id})
+    except Exception as e:
+        conn.rollback()
+        print("❌ Erro ao salvar envio:", e)
+        return jsonify({"ok": False, "erro": "erro ao salvar envio"}), 500
     finally:
         cur.close()
         conn.close()
