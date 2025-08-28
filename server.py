@@ -89,7 +89,8 @@ def init_db():
             grupo_trabalho TEXT,
             data_hora TIMESTAMP DEFAULT NOW(),
             telefone TEXT,
-            conteudo TEXT
+            conteudo TEXT,
+            status TEXT DEFAULT 'pendente'
         );
     """)
 
@@ -403,9 +404,10 @@ def criar_envio():
 
         for c in contatos:
             cur.execute("""
-                INSERT INTO envios_analitico (envio_id, nome_disparo, grupo_trabalho, telefone, conteudo)
-                VALUES (%s,%s,%s,%s,%s)
+                INSERT INTO envios_analitico (envio_id, nome_disparo, grupo_trabalho, telefone, conteudo, status)
+                VALUES (%s,%s,%s,%s,%s,'pendente')
             """, (envio_id, nome, grupo, c.get("telefone"), c.get("conteudo")))
+
 
         conn.commit()
         return jsonify({"ok": True, "id": envio_id})
