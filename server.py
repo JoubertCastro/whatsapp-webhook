@@ -37,7 +37,7 @@ def init_db():
             nome TEXT,
             msg_id TEXT,
             phone_number_id TEXT,
-            display_phone_number TEXT,o
+            display_phone_number TEXT,
             raw JSONB
         );
     """)
