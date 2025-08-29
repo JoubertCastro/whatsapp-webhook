@@ -36,8 +36,8 @@ def init_db():
             direcao TEXT,
             nome TEXT,
             msg_id TEXT,
-            phone_number_id TEXT,          -- ✅ novo campo
-            display_phone_number TEXT,     -- ✅ novo campo
+            phone_number_id TEXT,
+            display_phone_number TEXT,o
             raw JSONB
         );
     """)
@@ -49,11 +49,15 @@ def init_db():
             msg_id TEXT,
             recipient_id TEXT,
             status TEXT,
-            phone_number_id TEXT,          -- ✅ novo campo
-            display_phone_number TEXT,     -- ✅ novo campo
+            phone_number_id TEXT,
+            display_phone_number TEXT,
+            envio_id INT,
+            nome_disparo TEXT,
+            grupo_trabalho TEXT,
             raw JSONB
         );
     """)
+
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
@@ -125,20 +129,23 @@ def salvar_mensagem(remetente, mensagem, msg_id=None, nome=None, timestamp=None,
 
 
 def salvar_status(msg_id, recipient_id, status, raw, timestamp=None,
-                  phone_number_id=None, display_phone_number=None):
+                  phone_number_id=None, display_phone_number=None,
+                  envio_id=None, nome_disparo=None, grupo_trabalho=None):
     data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=3)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO status_mensagens (data_hora, msg_id, recipient_id, status, phone_number_id, display_phone_number, raw) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO status_mensagens (data_hora, msg_id, recipient_id, status, phone_number_id, display_phone_number, envio_id, nome_disparo, grupo_trabalho, raw) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (data_hora, msg_id, recipient_id, status,
          phone_number_id, display_phone_number,
+         envio_id, nome_disparo, grupo_trabalho,
          json.dumps(raw))
     )
     conn.commit()
     cur.close()
     conn.close()
+
 
 
 init_db()
