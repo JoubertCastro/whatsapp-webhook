@@ -77,7 +77,10 @@ def init_db():
             intervalo_msg INT,
             tamanho_lote INT,
             intervalo_lote INT,
-            template JSONB
+            template JSONB,
+            token TEXT,
+            phone_id TEXT,
+            waba_id TEXT
         );
     """)
 
@@ -395,11 +398,19 @@ def criar_envio():
     try:
         cur.execute("""
             INSERT INTO envios (nome_disparo, grupo_trabalho, modo_envio, data_hora_agendamento,
-                                intervalo_msg, tamanho_lote, intervalo_lote, template)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                                intervalo_msg, tamanho_lote, intervalo_lote,
+                                template, token, phone_id, waba_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             RETURNING id
-        """, (nome, grupo, modo, agendamento, intervalo_msg, tamanho_lote, intervalo_lote,
-            json.dumps(data.get("template"))))
+        """, (
+            nome, grupo, modo, agendamento,
+            intervalo_msg, tamanho_lote, intervalo_lote,
+            json.dumps(data.get("template")),
+            data.get("token"),    
+            data.get("phone_id"), 
+            data.get("waba_id")   
+        ))
+
         envio_id = cur.fetchone()["id"]
 
         for c in contatos:

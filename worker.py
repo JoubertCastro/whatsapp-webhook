@@ -41,6 +41,15 @@ def fetch_pendentes():
     conn.close()
     return row
 
+def fetch_envio(envio_id):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM envios WHERE id = %s", (envio_id,))
+    envio = cur.fetchone()
+    cur.close()
+    conn.close()
+    return envio
+
 
 def fetch_contatos(envio_id):
     conn = get_conn()
@@ -111,22 +120,28 @@ def montar_payload(template, contato):
     }
 
 
-def enviar_whatsapp(payload):
-    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_ID}/messages"
+def enviar_whatsapp(payload, token, phone_id, graph_version="v23.0"):
+    url = f"https://graph.facebook.com/{graph_version}/{phone_id}/messages"
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
-    r = requests.post(url, headers=headers, data=json.dumps(payload))
+    r = requests.post(url, headers=headers, json=payload)
+    if not r.ok:
+        print("❌ Erro WhatsApp:", r.status_code, r.text)
     return r.ok, r.text
 
 
+
 def processar_envio(envio):
-    template = envio.get("template")  # já vem do banco (JSONB)
+    template = envio.get("template")  # JSONB já
     contatos = fetch_contatos(envio["id"])
     tamanho_lote = envio.get("tamanho_lote") or len(contatos)
     intervalo_lote = envio.get("intervalo_lote") or 0
     intervalo_msg = envio.get("intervalo_msg") or 0
+
+    token = envio.get("token")
+    phone_id = envio.get("phone_id")
 
     total = len(contatos)
     enviados = 0
@@ -134,7 +149,7 @@ def processar_envio(envio):
         lote = contatos[i:i+tamanho_lote]
         for c in lote:
             payload = montar_payload(template, c)
-            ok, resp = enviar_whatsapp(payload)
+            ok, resp = enviar_whatsapp(payload, token, phone_id)  # ✅ passa credenciais do envio
             print("✔️" if ok else "❌", c["telefone"], resp[:100])
 
             atualizar_status(c["id"], "enviado" if ok else "erro")
