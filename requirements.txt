@@ -2,6 +2,7 @@ flask
 gunicorn
 psycopg2-binary
 requests
-flask-cors
 pydrive2
 oauth2client
+werkzeug
+flask-cors
