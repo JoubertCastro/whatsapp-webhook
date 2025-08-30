@@ -1,7 +1,7 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 import psycopg2, psycopg2.extras, os
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=".", static_url_path="")
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -10,6 +10,7 @@ DATABASE_URL = os.getenv(
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
+# ---------- Endpoints API ----------
 @app.route("/api/dashboard/resumo")
 def resumo():
     conn = get_conn()
@@ -48,6 +49,11 @@ def envios():
         cur.close()
         conn.close()
 
+# ---------- Página do Dashboard ----------
+@app.route("/dashboard")
+def dashboard_page():
+    return send_from_directory(".", "dashboard.html")
+
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 6000))  # roda separado do server.py
+    port = int(os.getenv("PORT", 6000))
     app.run(host="0.0.0.0", port=port, debug=True)
