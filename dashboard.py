@@ -1,12 +1,15 @@
 from flask import Flask, jsonify, request, send_from_directory
+from flask_cors import CORS
 import psycopg2, psycopg2.extras, os
 
 app = Flask(__name__, static_folder=".", static_url_path="")
+CORS(app)  # habilita CORS depois de criar o app
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
 )
+
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
