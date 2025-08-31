@@ -21,7 +21,7 @@ def listar_contatos():
     try:
         cur.execute("""
             SELECT DISTINCT
-                COALESCE(nome, remetente) AS nome,
+                concat(remetente,' - ',COALESCE(nome, remetente)) AS nome,
                 remetente
             FROM mensagens
             ORDER BY nome
