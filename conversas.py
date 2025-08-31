@@ -3,8 +3,9 @@ import psycopg2, psycopg2.extras, os, json, requests
 from flask_cors import CORS
 
 conversas_bp = Blueprint("conversas", __name__)
-CORS(conversas_bp)  # habilita CORS só para esse blueprint
-
+#CORS(conversas_bp)  # habilita CORS só para esse blueprint
+app = Flask(__name__, static_folder=".", static_url_path="")
+CORS(app)  # habilita CORS depois de criar o app
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
