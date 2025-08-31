@@ -146,3 +146,20 @@ def enviar_mensagem(telefone):
     r = requests.post(url, headers=headers, json=payload)
 
     return jsonify({"ok": r.status_code == 200, "resposta": r.json()})
+# 🔹 Lista contatos únicos
+@conversas_bp.route("/api/conversas/contatos", methods=["GET"])
+def listar_contatos():
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT DISTINCT
+                COALESCE(nome, remetente) AS nome,
+                remetente
+            FROM mensagens
+            ORDER BY nome
+        """)
+        return jsonify(cur.fetchall())
+    finally:
+        cur.close()
+        conn.close()
