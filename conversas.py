@@ -21,8 +21,8 @@ def listar_contatos():
     try:
         cur.execute("""
             SELECT DISTINCT
-                concat(remetente,' - ',COALESCE(nome, remetente)) AS nome,
-                remetente
+                COALESCE(nome, remetente) AS nome_exibicao,
+            remetente
             FROM mensagens
             ORDER BY nome
         """)
@@ -196,7 +196,7 @@ def historico_conversa(telefone):
                                     OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
                 where a.telefone = %s					
                 ORDER BY a.data_hora;
-        """, (telefone, telefone))
+        """, (telefone,))
         return jsonify(cur.fetchall())
     finally:
         cur.close()
