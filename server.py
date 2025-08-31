@@ -9,7 +9,6 @@ import os
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_cors import CORS  # ✅ Importa o CORS
 
-# --- Cria app antes de registrar blueprint ---
 app = Flask(__name__)
 CORS(app)  # ✅ Ativa CORS para todas as rotas
 
@@ -433,13 +432,7 @@ def criar_envio():
 
 
 
-
-# === Importa e registra conversas ===
-from conversas import conversas_bp
-app.register_blueprint(conversas_bp)
-
 # ---------- Run ----------
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
