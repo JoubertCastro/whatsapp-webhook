@@ -1,17 +1,13 @@
-from flask import Blueprint, request, jsonify,send_from_directory
-from flask_cors import CORS
+from flask import Blueprint, request, jsonify
 import psycopg2, psycopg2.extras, os, json, requests
 
-
 conversas_bp = Blueprint("conversas", __name__)
-#CORS(conversas_bp)  # habilita CORS só para esse blueprint
-app = Flask(__name__, static_folder=".", static_url_path="")
-CORS(app)  # habilita CORS depois de criar o app
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
 )
+
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -57,7 +53,7 @@ def listar_conversas():
             FROM mensagens
         ),
         conversas AS (
-            SELECT data_hora, regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') as telefone,
+            SELECT data_hora, regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') as telefone,
                    phone_id, status, mensagem_final
             FROM enviados
             UNION 
@@ -77,7 +73,7 @@ def listar_conversas():
         FROM conversas a
         INNER JOIN msg_id b 
           ON a.telefone = b.remetente
-             OR a.telefone = regexp_replace(b.remetente, '(?<=^55\\d{2})9', '', 'g')
+             OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
         """
 
         filtros = []
@@ -104,7 +100,7 @@ def listar_conversas():
         cur.close()
         conn.close()
 
-# 📜 Histórico de mensagens de um telefone
+# 📜 Histórico
 @conversas_bp.route("/api/conversas/<telefone>", methods=["GET"])
 def historico_conversa(telefone):
     conn = get_conn()
@@ -126,7 +122,7 @@ def historico_conversa(telefone):
         cur.close()
         conn.close()
 
-# ✉️ Envia mensagem para cliente
+# ✉️ Envia mensagem
 @conversas_bp.route("/api/conversas/<telefone>", methods=["POST"])
 def enviar_mensagem(telefone):
     data = request.get_json() or {}
@@ -150,11 +146,3 @@ def enviar_mensagem(telefone):
     r = requests.post(url, headers=headers, json=payload)
 
     return jsonify({"ok": r.status_code == 200, "resposta": r.json()})
-
-@app.route("/conversas")
-def dashboard_page():
-    return send_from_directory(".", "conversas.html")
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 6000))
-    app.run(host="0.0.0.0", port=port, debug=True)
