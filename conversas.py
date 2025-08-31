@@ -127,15 +127,75 @@ def historico_conversa(telefone):
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT data_hora, status, mensagem_final
-            FROM (
-                SELECT data_hora, remetente AS telefone, direcao AS status, mensagem AS mensagem_final
-                FROM mensagens WHERE remetente = %s
-                UNION
-                SELECT ea.data_hora, ea.telefone, ea.status, ea.conteudo
-                FROM envios_analitico ea WHERE ea.telefone = %s
-            ) t
-            ORDER BY data_hora
+            WITH dados AS (
+                    SELECT 
+                        ea.nome_disparo,
+                        ea.grupo_trabalho,
+                        ea.data_hora,
+                        ea.telefone,
+                        ea.status,
+                        ea.conteudo,
+                        phone_id,
+                        string_to_array(ea.conteudo, ',') AS vars,
+                        (envios.template::json ->> 'bodyText') AS body_text
+                    FROM envios_analitico ea
+                    JOIN envios 
+                    ON ea.nome_disparo = envios.nome_disparo 
+                    AND ea.grupo_trabalho = envios.grupo_trabalho
+                ),
+                enviados AS (
+                    SELECT 
+                        nome_disparo,
+                        grupo_trabalho,
+                        data_hora,
+                        telefone,
+                        phone_id,
+                        status,
+                        (
+                            SELECT 
+                                COALESCE(
+                                    string_agg(
+                                        regexp_replace(body_text, '\{\{' || g.idx || '\}\}', g.val, 'g'),
+                                        '' ORDER BY g.idx
+                                    ),
+                                    body_text
+                                )
+                            FROM (
+                                SELECT generate_subscripts(vars, 1) AS idx, unnest(vars) AS val
+                            ) g
+                        ) AS mensagem_final
+                    FROM dados
+                ),
+                cliente_msg AS (
+                    SELECT 
+                        data_hora,
+                        remetente AS telefone,
+                        phone_number_id AS phone_id,
+                        direcao AS status,
+                        mensagem AS mensagem_final
+                    FROM mensagens
+                ),
+                conversas AS (
+                    SELECT data_hora,regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') as  telefone, phone_id, status, mensagem_final
+                    FROM enviados
+                    UNION 
+                    SELECT data_hora, telefone, phone_id, status, mensagem_final
+                    FROM cliente_msg
+                ),
+                msg_id as (
+                select remetente,msg_id
+                from (
+                select data_hora,remetente,msg_id,
+                row_number()Over(Partition by remetente order by data_hora desc)Indice
+                from mensagens)
+                where indice = 1
+                )
+                SELECT a.data_hora,a.status,a.mensagem_final
+                FROM conversas a
+                INNER JOIN msg_id b ON a.telefone = b.remetente
+                                    OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
+                where a.telefone = %s					
+                ORDER BY a.data_hora;
         """, (telefone, telefone))
         return jsonify(cur.fetchall())
     finally:
