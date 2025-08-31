@@ -433,6 +433,11 @@ def criar_envio():
 
 
 # ---------- Run ----------
+
+# === Importa e registra conversas ===
+from conversas import conversas_bp
+app.register_blueprint(conversas_bp)
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
