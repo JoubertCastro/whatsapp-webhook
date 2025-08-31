@@ -3,7 +3,7 @@ from flask_cors import CORS
 import psycopg2, psycopg2.extras, os, requests
 
 app = Flask(__name__)
-CORS(app)  # Libera CORS para todas as origens
+CORS(app, resources={r"/api/*": {"origins": "https://joubertcastro.github.io"}})
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -22,9 +22,9 @@ def listar_contatos():
         cur.execute("""
             SELECT DISTINCT
                 COALESCE(nome, remetente) AS nome_exibicao,
-            remetente
+                remetente
             FROM mensagens
-            ORDER BY nome
+            ORDER BY nome_exibicao
         """)
         return jsonify(cur.fetchall())
     finally:
@@ -225,7 +225,14 @@ def enviar_mensagem(telefone):
     headers = {"Authorization": f"Bearer {os.getenv('META_TOKEN')}"}
     r = requests.post(url, headers=headers, json=payload)
 
-    return jsonify({"ok": r.status_code == 200, "resposta": r.json()})
+    if r.status_code != 200:
+        return jsonify({
+            "ok": False,
+            "erro": r.json().get("error", "Erro desconhecido"),
+            "status_code": r.status_code
+        }), r.status_code
+    return jsonify({"ok": True, "resposta": r.json()})
+
 
 # 🔁 Executa o app
 if __name__ == "__main__":
