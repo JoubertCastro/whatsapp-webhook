@@ -1,6 +1,7 @@
-from flask import Blueprint, request, jsonify
-import psycopg2, psycopg2.extras, os, json, requests
+from flask import Blueprint, request, jsonify,send_from_directory
 from flask_cors import CORS
+import psycopg2, psycopg2.extras, os, json, requests
+
 
 conversas_bp = Blueprint("conversas", __name__)
 #CORS(conversas_bp)  # habilita CORS só para esse blueprint
@@ -149,3 +150,11 @@ def enviar_mensagem(telefone):
     r = requests.post(url, headers=headers, json=payload)
 
     return jsonify({"ok": r.status_code == 200, "resposta": r.json()})
+
+@app.route("/conversas")
+def dashboard_page():
+    return send_from_directory(".", "conversas.html")
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 6000))
+    app.run(host="0.0.0.0", port=port, debug=True)
