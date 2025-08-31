@@ -1,7 +1,10 @@
 from flask import Blueprint, request, jsonify
 import psycopg2, psycopg2.extras, os, json, requests
+from flask_cors import CORS
 
 conversas_bp = Blueprint("conversas", __name__)
+CORS(conversas_bp)  # habilita CORS só para esse blueprint
+
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
