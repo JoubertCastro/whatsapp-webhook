@@ -13,10 +13,6 @@ from flask_cors import CORS  # ✅ Importa o CORS
 app = Flask(__name__)
 CORS(app)  # ✅ Ativa CORS para todas as rotas
 
-# === Importa e registra conversas ===
-from conversas import conversas_bp
-app.register_blueprint(conversas_bp)
-
 # ---------- Config ----------
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
