@@ -1,3 +1,3 @@
 web: gunicorn server:app
-worker: python worker.py
-worker: python conversas.py
+worker_envios: python worker.py
+worker_conversas: python conversas.py
