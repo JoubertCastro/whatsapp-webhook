@@ -1,18 +1,9 @@
-#from flask import Blueprint, request, jsonify
-#import psycopg2, psycopg2.extras, os, json, requests
-
-#conversas_bp = Blueprint("conversas", __name__)
-
-from flask import Flask
+from flask import Flask, request, jsonify
 from flask_cors import CORS
+import psycopg2, psycopg2.extras, os, requests
 
 app = Flask(__name__)
-CORS(app)  # Isso libera CORS para todos os endpoints e origens
-
-# Ou, se quiser liberar só para seu domínio:
-# CORS(app, resources={r"/api/*": {"origins": "https://joubertcastro.github.io"}})
-
-app.register_blueprint(conversas_bp)
+CORS(app)  # Libera CORS para todas as origens
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -22,8 +13,26 @@ DATABASE_URL = os.getenv(
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
+# 🔹 Lista contatos únicos
+@app.route("/api/conversas/contatos", methods=["GET"])
+def listar_contatos():
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT DISTINCT
+                COALESCE(nome, remetente) AS nome,
+                remetente
+            FROM mensagens
+            ORDER BY nome
+        """)
+        return jsonify(cur.fetchall())
+    finally:
+        cur.close()
+        conn.close()
+
 # 🔎 Lista contatos com última mensagem
-@conversas_bp.route("/api/conversas", methods=["GET"])
+@app.route("/api/conversas", methods=["GET"])
 def listar_conversas():
     filtro_telefone = request.args.get("telefone")
     filtro_phone_id = request.args.get("phone_id")
@@ -112,7 +121,7 @@ def listar_conversas():
         conn.close()
 
 # 📜 Histórico
-@conversas_bp.route("/api/conversas/<telefone>", methods=["GET"])
+@app.route("/api/conversas/<telefone>", methods=["GET"])
 def historico_conversa(telefone):
     conn = get_conn()
     cur = conn.cursor()
@@ -134,7 +143,7 @@ def historico_conversa(telefone):
         conn.close()
 
 # ✉️ Envia mensagem
-@conversas_bp.route("/api/conversas/<telefone>", methods=["POST"])
+@app.route("/api/conversas/<telefone>", methods=["POST"])
 def enviar_mensagem(telefone):
     data = request.get_json() or {}
     phone_id = data.get("phone_id")
@@ -157,20 +166,8 @@ def enviar_mensagem(telefone):
     r = requests.post(url, headers=headers, json=payload)
 
     return jsonify({"ok": r.status_code == 200, "resposta": r.json()})
-# 🔹 Lista contatos únicos
-@conversas_bp.route("/api/conversas/contatos", methods=["GET"])
-def listar_contatos():
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            SELECT DISTINCT
-                COALESCE(nome, remetente) AS nome,
-                remetente
-            FROM mensagens
-            ORDER BY nome
-        """)
-        return jsonify(cur.fetchall())
-    finally:
-        cur.close()
-        conn.close()
+
+# 🔁 Executa o app
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 6000))
+    app.run(host="0.0.0.0", port=port, debug=True)
