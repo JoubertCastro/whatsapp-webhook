@@ -1,7 +1,18 @@
-from flask import Blueprint, request, jsonify
-import psycopg2, psycopg2.extras, os, json, requests
+#from flask import Blueprint, request, jsonify
+#import psycopg2, psycopg2.extras, os, json, requests
 
-conversas_bp = Blueprint("conversas", __name__)
+#conversas_bp = Blueprint("conversas", __name__)
+
+from flask import Flask
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)  # Isso libera CORS para todos os endpoints e origens
+
+# Ou, se quiser liberar só para seu domínio:
+# CORS(app, resources={r"/api/*": {"origins": "https://joubertcastro.github.io"}})
+
+app.register_blueprint(conversas_bp)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
