@@ -23,7 +23,7 @@ def listar_conversas():
     conn = get_conn()
     cur = conn.cursor()
     try:
-        sql = """
+        sql = r"""
         WITH dados AS (
             SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
                    ea.telefone, ea.status, ea.conteudo,
