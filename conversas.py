@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 
 app = Flask(__name__)
 
-# Origens permitidas (para testes pode ser "*", em produção coloque sua origem)
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://joubertcastro.github.io")
-CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
+# Permitir múltiplas origens (ex: GitHub Pages, localhost, etc.)
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}}, supports_credentials=True)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
