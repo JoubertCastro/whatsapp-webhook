@@ -11,7 +11,7 @@ CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:senha@postgres.railway.internal:5432/railway"
+    "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
 )
 
 # Defaults (recomendo definir via ambiente)
