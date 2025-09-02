@@ -1,33 +1,79 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
-import psycopg2, psycopg2.extras, os, requests, json
-from datetime import datetime, timezone
+import psycopg2, psycopg2.extras, os, requests
+from datetime import datetime
 
 app = Flask(__name__)
 
+# --- CORS ---
 # Permitir múltiplas origens (ex: GitHub Pages, localhost, etc.)
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}}, supports_credentials=True)
+# Dica: defina na Railway -> ALLOWED_ORIGINS="https://joubertcastro.github.io,https://*.github.io,*"
+origins_env = os.getenv("ALLOWED_ORIGINS", "https://joubertcastro.github.io,https://*.github.io,*")
+ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()]
 
+# Usa "*" se presente; senão usa a lista explícita
+cors_origins = "*" if "*" in ALLOWED_ORIGINS else ALLOWED_ORIGINS
+
+CORS(
+    app,
+    resources={r"/api/*": {
+        "origins": cors_origins,
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "expose_headers": ["Content-Type"]
+    }},
+    supports_credentials=False  # não usamos cookies
+)
+
+def _origin_allowed(origin: str) -> bool:
+    if not origin:
+        return False
+    if "*" in ALLOWED_ORIGINS:
+        return True
+    if origin in ALLOWED_ORIGINS:
+        return True
+    # curingas simples
+    if origin.endswith(".github.io") and "https://*.github.io" in ALLOWED_ORIGINS:
+        return True
+    return False
+
+@app.after_request
+def add_cors_headers(resp):
+    # Garante CORS mesmo se algum middleware falhar
+    origin = request.headers.get("Origin")
+    if _origin_allowed(origin):
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return resp
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        r = make_response("")
+        r.status_code = 204
+        return r
+
+# favicon (evita 404 no console)
+@app.route("/favicon.ico")
+def favicon():
+    return "", 204
+
+
+# --- CONFIG DB e META ---
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
 )
-
-# Defaults (recomendo definir via ambiente)
 DEFAULT_TOKEN = os.getenv("META_TOKEN", "")
 DEFAULT_PHONE_ID = os.getenv("PHONE_ID", "")
 DEFAULT_WABA_ID = os.getenv("WABA_ID", "")
 
-
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
-
 def ensure_tables():
-    """
-    Cria tabela mensagens_avulsas caso não exista (útil para armazenar envios manuais).
-    """
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -49,8 +95,8 @@ def ensure_tables():
         cur.close()
         conn.close()
 
-
 ensure_tables()
+
 
 # 🔹 Lista contatos únicos (última mensagem por contato)
 @app.route("/api/conversas/contatos", methods=["GET"])
@@ -58,9 +104,6 @@ def listar_contatos():
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # Usamos a mesma base que a listagem de conversas (mensagens + envios analítico),
-        # pegando a última mensagem por telefone. Também tentamos obter um 'nome_exibicao'
-        # a partir da tabela mensagens, se existir.
         sql = r"""
             WITH dados AS (
                 SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
@@ -99,7 +142,7 @@ def listar_contatos():
             ),
             conversas AS (
                 SELECT data_hora,
-                       regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone,
+                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
                        phone_id, status, mensagem_final
                 FROM enviados
                 UNION
@@ -122,7 +165,7 @@ def listar_contatos():
                 FROM conversas a
                 INNER JOIN msg_id b
                   ON a.telefone = b.remetente
-                  OR a.telefone = regexp_replace(b.remetente, '(?<=^55\\d{2})9', '', 'g')
+                  OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
             )
             SELECT r.telefone AS remetente,
                    (SELECT COALESCE(nome, r.telefone) FROM mensagens m WHERE m.remetente = r.telefone ORDER BY m.data_hora DESC LIMIT 1) AS nome_exibicao,
@@ -143,7 +186,7 @@ def listar_contatos():
         conn.close()
 
 
-# 🔎 Lista conversas (mantive sua query robusta para relatórios)
+# 🔎 Lista conversas (relatório)
 @app.route("/api/conversas", methods=["GET"])
 def listar_conversas():
     filtro_telefone = request.args.get("telefone")
@@ -170,8 +213,6 @@ def listar_conversas():
                     ON ea.nome_disparo = envios.nome_disparo 
                     AND ea.grupo_trabalho = envios.grupo_trabalho
                 ),
-
-                -- Substituições sequenciais com CTE recursivo (uma única mensagem_final)
                 enviados AS (
                     SELECT 
                         d.nome_disparo,
@@ -184,10 +225,8 @@ def listar_conversas():
                     FROM dados d
                     LEFT JOIN LATERAL (
                         WITH RECURSIVE rep(i, txt) AS (
-                            -- i = 0: começa com o template original
                             SELECT 0, d.body_text
                             UNION ALL
-                            -- cada iteração substitui {{i+1}} por vars[i+1]
                             SELECT i + 1,
                                 regexp_replace(
                                     txt,
@@ -198,14 +237,12 @@ def listar_conversas():
                             FROM rep
                             WHERE i < COALESCE(array_length(d.vars, 1), 0)
                         )
-                        -- pega texto após a última substituição
                         SELECT txt
                         FROM rep
                         ORDER BY i DESC
                         LIMIT 1
                     ) rep ON TRUE
                 ),
-
                 cliente_msg AS (
                     SELECT 
                         data_hora,
@@ -215,7 +252,6 @@ def listar_conversas():
                         mensagem AS mensagem_final
                     FROM mensagens
                 ),
-
                 conversas AS (
                     SELECT 
                         data_hora,
@@ -224,13 +260,10 @@ def listar_conversas():
                         status,
                         mensagem_final
                     FROM enviados
-
                     UNION
-
                     SELECT data_hora, telefone, phone_id, status, mensagem_final
                     FROM cliente_msg
                 ),
-
                 msg_id AS (
                     SELECT remetente, msg_id
                     FROM (
@@ -240,7 +273,6 @@ def listar_conversas():
                     ) t
                     WHERE indice = 1
                 )
-
                 SELECT a.data_hora,
                     a.telefone,
                     a.phone_id,
@@ -251,8 +283,6 @@ def listar_conversas():
                 INNER JOIN msg_id b 
                     ON a.telefone = b.remetente
                     OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
-                order by data_hora	   
-                ;
         """
 
         filtros = []
@@ -279,7 +309,7 @@ def listar_conversas():
         conn.close()
 
 
-# 📜 Histórico com filtro por data_inicio e data_fim (query params)
+# 📜 Histórico com filtro por data_inicio e data_fim
 @app.route("/api/conversas/<telefone>", methods=["GET"])
 def historico_conversa(telefone):
     data_inicio = request.args.get("data_inicio")
@@ -305,8 +335,6 @@ def historico_conversa(telefone):
                 ON ea.nome_disparo = envios.nome_disparo 
                 AND ea.grupo_trabalho = envios.grupo_trabalho
             ),
-
-            -- Substituições sequenciais com CTE recursivo (uma única mensagem_final)
             enviados AS (
                 SELECT 
                     d.nome_disparo,
@@ -319,10 +347,8 @@ def historico_conversa(telefone):
                 FROM dados d
                 LEFT JOIN LATERAL (
                     WITH RECURSIVE rep(i, txt) AS (
-                        -- i = 0: começa com o template original
                         SELECT 0, d.body_text
                         UNION ALL
-                        -- cada iteração substitui {{i+1}} por vars[i+1]
                         SELECT i + 1,
                             regexp_replace(
                                 txt,
@@ -333,14 +359,12 @@ def historico_conversa(telefone):
                         FROM rep
                         WHERE i < COALESCE(array_length(d.vars, 1), 0)
                     )
-                    -- pega texto após a última substituição
                     SELECT txt
                     FROM rep
                     ORDER BY i DESC
                     LIMIT 1
                 ) rep ON TRUE
             ),
-
             cliente_msg AS (
                 SELECT 
                     data_hora,
@@ -350,7 +374,6 @@ def historico_conversa(telefone):
                     mensagem AS mensagem_final
                 FROM mensagens
             ),
-
             conversas AS (
                 SELECT 
                     data_hora,
@@ -359,13 +382,10 @@ def historico_conversa(telefone):
                     status,
                     mensagem_final
                 FROM enviados
-
                 UNION
-
                 SELECT data_hora, telefone, phone_id, status, mensagem_final
                 FROM cliente_msg
             ),
-
             msg_id AS (
                 SELECT remetente, msg_id
                 FROM (
@@ -375,7 +395,6 @@ def historico_conversa(telefone):
                 ) t
                 WHERE indice = 1
             )
-
             SELECT a.data_hora,
                 a.status,
                 a.mensagem_final
@@ -383,9 +402,8 @@ def historico_conversa(telefone):
             INNER JOIN msg_id b 
                 ON a.telefone = b.remetente
                 OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
-            where a.telefone = %s
+            WHERE a.telefone = %s
         """
-
         params = [telefone]
         if data_inicio and data_fim:
             sql += " AND a.data_hora::date BETWEEN %s AND %s"
@@ -398,7 +416,6 @@ def historico_conversa(telefone):
             params.append(data_fim)
 
         sql += " ORDER BY a.data_hora;"
-
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
@@ -406,32 +423,33 @@ def historico_conversa(telefone):
         conn.close()
 
 
-# ✉️ Envia mensagem avulsa (aceita overrides via body; grava em mensagens_avulsas)
+# ✉️ Envia mensagem avulsa (grava em mensagens_avulsas e envia via Graph API)
 @app.route("/api/conversas/<telefone>", methods=["POST"])
 def enviar_mensagem(telefone):
-    data = request.get_json() or {}
-    texto = data.get("texto", "").strip()
-    # aceita override via body (útil para testes)
+    data = request.get_json(silent=True) or {}
+    texto = (data.get("texto") or "").strip()
+
     token = data.get("token") or DEFAULT_TOKEN
     phone_id = data.get("phone_id") or DEFAULT_PHONE_ID
     waba_id = data.get("waba_id") or DEFAULT_WABA_ID
-    msg_id = data.get("msg_id")  # necessário para responder no contexto
+    msg_id = data.get("msg_id")  # pode vir do front para contexto
 
     if not texto:
         return jsonify({"ok": False, "erro": "texto é obrigatório"}), 400
     if not token or not phone_id:
         return jsonify({"ok": False, "erro": "token ou phone_id não configurados. Use variáveis de ambiente ou passe no body."}), 400
-    if not msg_id:
-        return jsonify({"ok": False, "erro": "msg_id é obrigatório para responder"}), 400
 
     url = f"https://graph.facebook.com/v23.0/{phone_id}/messages"
     payload = {
         "messaging_product": "whatsapp",
         "to": telefone,
-        "context": {"message_id": msg_id},
         "type": "text",
         "text": {"body": texto}
     }
+    # Inclui contexto se fornecido para manter o encadeamento da conversa
+    if msg_id:
+        payload["context"] = {"message_id": str(msg_id)}
+
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
@@ -443,15 +461,15 @@ def enviar_mensagem(telefone):
     status = "enviado" if ok else "erro"
 
     # tenta extrair msg_id retornado pela API
-    resposta_id = None
+    retorno_msg_id = None
     try:
         resp_json = r.json()
         if isinstance(resp_json, dict):
             msgs = resp_json.get("messages")
-            if isinstance(msgs, list) and len(msgs) > 0:
-                resposta_id = msgs[0].get("id")
+            if isinstance(msgs, list) and msgs:
+                retorno_msg_id = msgs[0].get("id")
     except Exception:
-        resposta_id = None
+        retorno_msg_id = None
 
     # Insere no banco (mensagens_avulsas)
     conn = get_conn()
@@ -467,7 +485,7 @@ def enviar_mensagem(telefone):
             phone_id,
             waba_id,
             status,
-            resposta_id or msg_id  # salva o id retornado se houver
+            retorno_msg_id or msg_id
         ))
         conn.commit()
     finally:
@@ -481,7 +499,8 @@ def enviar_mensagem(telefone):
             err = r.text
         return jsonify({"ok": False, "erro": err, "status_code": r.status_code}), r.status_code
 
-    return jsonify({"ok": True, "resposta": r.json(), "msg_id": resposta_id or msg_id})
+    return jsonify({"ok": True, "resposta": r.json(), "msg_id": retorno_msg_id or msg_id})
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 6000))
