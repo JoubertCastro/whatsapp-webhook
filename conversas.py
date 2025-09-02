@@ -415,16 +415,20 @@ def enviar_mensagem(telefone):
     token = data.get("token") or DEFAULT_TOKEN
     phone_id = data.get("phone_id") or DEFAULT_PHONE_ID
     waba_id = data.get("waba_id") or DEFAULT_WABA_ID
+    msg_id = data.get("msg_id")  # necessário para responder no contexto
 
     if not texto:
         return jsonify({"ok": False, "erro": "texto é obrigatório"}), 400
     if not token or not phone_id:
         return jsonify({"ok": False, "erro": "token ou phone_id não configurados. Use variáveis de ambiente ou passe no body."}), 400
+    if not msg_id:
+        return jsonify({"ok": False, "erro": "msg_id é obrigatório para responder"}), 400
 
     url = f"https://graph.facebook.com/v23.0/{phone_id}/messages"
     payload = {
         "messaging_product": "whatsapp",
         "to": telefone,
+        "context": {"message_id": msg_id},
         "type": "text",
         "text": {"body": texto}
     }
@@ -439,16 +443,15 @@ def enviar_mensagem(telefone):
     status = "enviado" if ok else "erro"
 
     # tenta extrair msg_id retornado pela API
-    msg_id = None
+    resposta_id = None
     try:
         resp_json = r.json()
         if isinstance(resp_json, dict):
-            # Graph normalmente devolve {'messages':[{'id': '...'}]}
             msgs = resp_json.get("messages")
             if isinstance(msgs, list) and len(msgs) > 0:
-                msg_id = msgs[0].get("id")
+                resposta_id = msgs[0].get("id")
     except Exception:
-        msg_id = None
+        resposta_id = None
 
     # Insere no banco (mensagens_avulsas)
     conn = get_conn()
@@ -464,7 +467,7 @@ def enviar_mensagem(telefone):
             phone_id,
             waba_id,
             status,
-            msg_id
+            resposta_id or msg_id  # salva o id retornado se houver
         ))
         conn.commit()
     finally:
@@ -472,15 +475,13 @@ def enviar_mensagem(telefone):
         conn.close()
 
     if not ok:
-        # retorna o erro retornado pela API (se houver)
         try:
             err = r.json().get("error", r.text)
         except Exception:
             err = r.text
         return jsonify({"ok": False, "erro": err, "status_code": r.status_code}), r.status_code
 
-    return jsonify({"ok": True, "resposta": r.json(), "msg_id": msg_id})
-
+    return jsonify({"ok": True, "resposta": r.json(), "msg_id": resposta_id or msg_id})
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 6000))
