@@ -1,17 +1,13 @@
 from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
-import psycopg2, psycopg2.extras, os, requests
+import psycopg2, psycopg2.extras, os, requests, json
 from datetime import datetime
 
 app = Flask(__name__)
 
 # --- CORS ---
-# Permitir múltiplas origens (ex: GitHub Pages, localhost, etc.)
-# Dica: defina na Railway -> ALLOWED_ORIGINS="https://joubertcastro.github.io,https://*.github.io,*"
 origins_env = os.getenv("ALLOWED_ORIGINS", "https://joubertcastro.github.io,https://*.github.io,*")
 ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()]
-
-# Usa "*" se presente; senão usa a lista explícita
 cors_origins = "*" if "*" in ALLOWED_ORIGINS else ALLOWED_ORIGINS
 
 CORS(
@@ -22,7 +18,7 @@ CORS(
         "allow_headers": ["Content-Type", "Authorization"],
         "expose_headers": ["Content-Type"]
     }},
-    supports_credentials=False  # não usamos cookies
+    supports_credentials=False
 )
 
 def _origin_allowed(origin: str) -> bool:
@@ -32,14 +28,12 @@ def _origin_allowed(origin: str) -> bool:
         return True
     if origin in ALLOWED_ORIGINS:
         return True
-    # curingas simples
     if origin.endswith(".github.io") and "https://*.github.io" in ALLOWED_ORIGINS:
         return True
     return False
 
 @app.after_request
 def add_cors_headers(resp):
-    # Garante CORS mesmo se algum middleware falhar
     origin = request.headers.get("Origin")
     if _origin_allowed(origin):
         resp.headers["Access-Control-Allow-Origin"] = origin
@@ -59,7 +53,6 @@ def handle_preflight():
 @app.route("/favicon.ico")
 def favicon():
     return "", 204
-
 
 # --- CONFIG DB e META ---
 DATABASE_URL = os.getenv(
@@ -81,14 +74,15 @@ def ensure_tables():
         cur.execute("""
             CREATE TABLE IF NOT EXISTS mensagens_avulsas (
                 id SERIAL PRIMARY KEY,
-                data_hora TIMESTAMP DEFAULT now(),
+                data_hora TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC'),
                 nome_exibicao TEXT,
-                remetente TEXT,
-                conteudo TEXT,
+                remetente TEXT NOT NULL,
+                conteudo TEXT NOT NULL,
                 phone_id TEXT,
                 waba_id TEXT,
-                status TEXT,
-                msg_id TEXT
+                status TEXT NOT NULL,
+                msg_id TEXT,
+                resposta_raw JSONB
             );
         """)
         conn.commit()
@@ -97,7 +91,6 @@ def ensure_tables():
         conn.close()
 
 ensure_tables()
-
 
 # 🔹 Lista contatos únicos (última mensagem por contato)
 @app.route("/api/conversas/contatos", methods=["GET"])
@@ -186,7 +179,6 @@ def listar_contatos():
         cur.close()
         conn.close()
 
-
 # 🔎 Lista conversas (relatório)
 @app.route("/api/conversas", methods=["GET"])
 def listar_conversas():
@@ -198,92 +190,66 @@ def listar_conversas():
     cur = conn.cursor()
     try:
         sql = r"""
-                WITH dados AS (
-                    SELECT 
-                        ea.nome_disparo,
-                        ea.grupo_trabalho,
-                        ea.data_hora,
-                        ea.telefone,
-                        ea.status,
-                        ea.conteudo,
-                        phone_id,
-                        string_to_array(ea.conteudo, ',') AS vars,
-                        (envios.template::json ->> 'bodyText') AS body_text
-                    FROM envios_analitico ea
-                    JOIN envios 
-                    ON ea.nome_disparo = envios.nome_disparo 
-                    AND ea.grupo_trabalho = envios.grupo_trabalho
-                ),
-                enviados AS (
-                    SELECT 
-                        d.nome_disparo,
-                        d.grupo_trabalho,
-                        d.data_hora,
-                        d.telefone,
-                        d.phone_id,
-                        d.status,
-                        COALESCE(rep.txt, d.body_text) AS mensagem_final
-                    FROM dados d
-                    LEFT JOIN LATERAL (
-                        WITH RECURSIVE rep(i, txt) AS (
-                            SELECT 0, d.body_text
-                            UNION ALL
-                            SELECT i + 1,
-                                regexp_replace(
-                                    txt,
-                                    '\{\{' || (i+1) || '\}\}',
-                                    COALESCE(btrim(d.vars[i+1]), ''),
-                                    'g'
-                                )
-                            FROM rep
-                            WHERE i < COALESCE(array_length(d.vars, 1), 0)
-                        )
-                        SELECT txt
+            WITH dados AS (
+                SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
+                       ea.telefone, ea.status, ea.conteudo,
+                       phone_id, string_to_array(ea.conteudo, ',') AS vars,
+                       (envios.template::json ->> 'bodyText') AS body_text
+                FROM envios_analitico ea
+                JOIN envios ON ea.nome_disparo = envios.nome_disparo
+                  AND ea.grupo_trabalho = envios.grupo_trabalho
+            ),
+            enviados AS (
+                SELECT d.nome_disparo, d.grupo_trabalho, d.data_hora,
+                       d.telefone, d.phone_id, d.status,
+                       COALESCE(rep.txt, d.body_text) AS mensagem_final
+                FROM dados d
+                LEFT JOIN LATERAL (
+                    WITH RECURSIVE rep(i, txt) AS (
+                        SELECT 0, d.body_text
+                        UNION ALL
+                        SELECT i+1,
+                            regexp_replace(
+                                txt,
+                                '\{\{' || (i+1) || '\}\}',
+                                COALESCE(btrim(d.vars[i+1]), ''),
+                                'g'
+                            )
                         FROM rep
-                        ORDER BY i DESC
-                        LIMIT 1
-                    ) rep ON TRUE
-                ),
-                cliente_msg AS (
-                    SELECT 
-                        data_hora,
-                        remetente AS telefone,
-                        phone_number_id AS phone_id,
-                        direcao AS status,
-                        mensagem AS mensagem_final
+                        WHERE i < COALESCE(array_length(d.vars, 1), 0)
+                    )
+                    SELECT txt FROM rep ORDER BY i DESC LIMIT 1
+                ) rep ON TRUE
+            ),
+            cliente_msg AS (
+                SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
+                       direcao AS status, mensagem AS mensagem_final
+                FROM mensagens
+            ),
+            conversas AS (
+                SELECT data_hora,
+                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
+                       phone_id, status, mensagem_final
+                FROM enviados
+                UNION
+                SELECT data_hora, telefone, phone_id, status, mensagem_final
+                FROM cliente_msg
+            ),
+            msg_id AS (
+                SELECT remetente, msg_id
+                FROM (
+                    SELECT data_hora, remetente, msg_id,
+                        row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS indice
                     FROM mensagens
-                ),
-                conversas AS (
-                    SELECT 
-                        data_hora,
-                        regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
-                        phone_id,
-                        status,
-                        mensagem_final
-                    FROM enviados
-                    UNION
-                    SELECT data_hora, telefone, phone_id, status, mensagem_final
-                    FROM cliente_msg
-                ),
-                msg_id AS (
-                    SELECT remetente, msg_id
-                    FROM (
-                        SELECT data_hora, remetente, msg_id,
-                            row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS indice
-                        FROM mensagens
-                    ) t
-                    WHERE indice = 1
-                )
-                SELECT a.data_hora,
-                    a.telefone,
-                    a.phone_id,
-                    a.status,
-                    a.mensagem_final,
-                    b.msg_id
-                FROM conversas a
-                INNER JOIN msg_id b 
-                    ON a.telefone = b.remetente
-                    OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
+                ) t
+                WHERE indice = 1
+            )
+            SELECT a.data_hora, a.telefone, a.phone_id,
+                   a.status, a.mensagem_final, b.msg_id
+            FROM conversas a
+            INNER JOIN msg_id b
+              ON a.telefone = b.remetente
+              OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
         """
 
         filtros = []
@@ -302,13 +268,11 @@ def listar_conversas():
             sql += " WHERE " + " AND ".join(filtros)
 
         sql += " ORDER BY a.data_hora DESC"
-
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
         cur.close()
         conn.close()
-
 
 # 📜 Histórico com filtro por data_inicio e data_fim
 @app.route("/api/conversas/<telefone>", methods=["GET"])
@@ -321,36 +285,24 @@ def historico_conversa(telefone):
     try:
         sql = r"""
             WITH dados AS (
-                SELECT 
-                    ea.nome_disparo,
-                    ea.grupo_trabalho,
-                    ea.data_hora,
-                    ea.telefone,
-                    ea.status,
-                    ea.conteudo,
-                    phone_id,
-                    string_to_array(ea.conteudo, ',') AS vars,
-                    (envios.template::json ->> 'bodyText') AS body_text
+                SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
+                       ea.telefone, ea.status, ea.conteudo,
+                       phone_id, string_to_array(ea.conteudo, ',') AS vars,
+                       (envios.template::json ->> 'bodyText') AS body_text
                 FROM envios_analitico ea
-                JOIN envios 
-                ON ea.nome_disparo = envios.nome_disparo 
-                AND ea.grupo_trabalho = envios.grupo_trabalho
+                JOIN envios ON ea.nome_disparo = envios.nome_disparo
+                  AND ea.grupo_trabalho = envios.grupo_trabalho
             ),
             enviados AS (
-                SELECT 
-                    d.nome_disparo,
-                    d.grupo_trabalho,
-                    d.data_hora,
-                    d.telefone,
-                    d.phone_id,
-                    d.status,
-                    COALESCE(rep.txt, d.body_text) AS mensagem_final
+                SELECT d.nome_disparo, d.grupo_trabalho, d.data_hora,
+                       d.telefone, d.phone_id, d.status,
+                       COALESCE(rep.txt, d.body_text) AS mensagem_final
                 FROM dados d
                 LEFT JOIN LATERAL (
                     WITH RECURSIVE rep(i, txt) AS (
                         SELECT 0, d.body_text
                         UNION ALL
-                        SELECT i + 1,
+                        SELECT i+1,
                             regexp_replace(
                                 txt,
                                 '\{\{' || (i+1) || '\}\}',
@@ -360,28 +312,18 @@ def historico_conversa(telefone):
                         FROM rep
                         WHERE i < COALESCE(array_length(d.vars, 1), 0)
                     )
-                    SELECT txt
-                    FROM rep
-                    ORDER BY i DESC
-                    LIMIT 1
+                    SELECT txt FROM rep ORDER BY i DESC LIMIT 1
                 ) rep ON TRUE
             ),
             cliente_msg AS (
-                SELECT 
-                    data_hora,
-                    remetente AS telefone,
-                    phone_number_id AS phone_id,
-                    direcao AS status,
-                    mensagem AS mensagem_final
+                SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
+                       direcao AS status, mensagem AS mensagem_final
                 FROM mensagens
             ),
             conversas AS (
-                SELECT 
-                    data_hora,
-                    regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
-                    phone_id,
-                    status,
-                    mensagem_final
+                SELECT data_hora,
+                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
+                       phone_id, status, mensagem_final
                 FROM enviados
                 UNION
                 SELECT data_hora, telefone, phone_id, status, mensagem_final
@@ -396,13 +338,11 @@ def historico_conversa(telefone):
                 ) t
                 WHERE indice = 1
             )
-            SELECT a.data_hora,
-                a.status,
-                a.mensagem_final
+            SELECT a.data_hora, a.status, a.mensagem_final
             FROM conversas a
-            INNER JOIN msg_id b 
-                ON a.telefone = b.remetente
-                OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
+            INNER JOIN msg_id b
+              ON a.telefone = b.remetente
+              OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
             WHERE a.telefone = %s
         """
         params = [telefone]
@@ -423,8 +363,7 @@ def historico_conversa(telefone):
         cur.close()
         conn.close()
 
-
-# ✉️ Envia mensagem avulsa (grava em mensagens_avulsas e envia via Graph API)
+# ✉️ Envia mensagem avulsa
 @app.route("/api/conversas/<telefone>", methods=["POST"])
 def enviar_mensagem(telefone):
     data = request.get_json(silent=True) or {}
@@ -433,12 +372,12 @@ def enviar_mensagem(telefone):
     token = data.get("token") or DEFAULT_TOKEN
     phone_id = data.get("phone_id") or DEFAULT_PHONE_ID
     waba_id = data.get("waba_id") or DEFAULT_WABA_ID
-    msg_id = data.get("msg_id")  # pode vir do front, mas agora é opcional
+    msg_id = data.get("msg_id")  # opcional
 
     if not texto:
         return jsonify({"ok": False, "erro": "texto é obrigatório"}), 400
     if not token or not phone_id:
-        return jsonify({"ok": False, "erro": "token ou phone_id não configurados. Use variáveis de ambiente ou passe no body."}), 400
+        return jsonify({"ok": False, "erro": "token ou phone_id não configurados"}), 400
 
     url = f"https://graph.facebook.com/v23.0/{phone_id}/messages"
     payload = {
@@ -447,7 +386,6 @@ def enviar_mensagem(telefone):
         "type": "text",
         "text": {"body": texto}
     }
-    # só envia contexto se msg_id não for nulo
     if msg_id:
         payload["context"] = {"message_id": str(msg_id)}
 
@@ -462,21 +400,23 @@ def enviar_mensagem(telefone):
     status = "enviado" if ok else "erro"
 
     retorno_msg_id = None
+    resposta_raw = None
     try:
-        resp_json = r.json()
-        if isinstance(resp_json, dict):
-            msgs = resp_json.get("messages")
+        resposta_raw = r.json()
+        if isinstance(resposta_raw, dict):
+            msgs = resposta_raw.get("messages")
             if isinstance(msgs, list) and msgs:
                 retorno_msg_id = msgs[0].get("id")
     except Exception:
-        retorno_msg_id = None
+        resposta_raw = {"erro": "não foi possível parsear resposta"}
 
     conn = get_conn()
     cur = conn.cursor()
     try:
         cur.execute("""
-            INSERT INTO mensagens_avulsas (nome_exibicao, remetente, conteudo, phone_id, waba_id, status, msg_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO mensagens_avulsas
+                (nome_exibicao, remetente, conteudo, phone_id, waba_id, status, msg_id, resposta_raw)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             f"Cliente {telefone}",
             telefone,
@@ -484,23 +424,21 @@ def enviar_mensagem(telefone):
             phone_id,
             waba_id,
             status,
-            retorno_msg_id or msg_id  # salva se houver
+            retorno_msg_id or msg_id,
+            json.dumps(resposta_raw) if resposta_raw else None
         ))
         conn.commit()
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"ok": False, "erro": f"Falha ao salvar no banco: {str(e)}"}), 500
     finally:
         cur.close()
         conn.close()
 
     if not ok:
-        try:
-            err = r.json().get("error", r.text)
-        except Exception:
-            err = r.text
-        return jsonify({"ok": False, "erro": err, "status_code": r.status_code}), r.status_code
+        return jsonify({"ok": False, "erro": resposta_raw, "status_code": r.status_code}), r.status_code
 
-    return jsonify({"ok": True, "resposta": r.json(), "msg_id": retorno_msg_id or msg_id})
-
-
+    return jsonify({"ok": True, "resposta": resposta_raw, "msg_id": retorno_msg_id or msg_id})
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 6000))
