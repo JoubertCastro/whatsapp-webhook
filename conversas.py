@@ -66,6 +66,7 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
 )
+VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "meu_token_secreto")
 DEFAULT_TOKEN = os.getenv("META_TOKEN", "")
 DEFAULT_PHONE_ID = os.getenv("PHONE_ID", "")
 DEFAULT_WABA_ID = os.getenv("WABA_ID", "")
@@ -432,7 +433,7 @@ def enviar_mensagem(telefone):
     token = data.get("token") or DEFAULT_TOKEN
     phone_id = data.get("phone_id") or DEFAULT_PHONE_ID
     waba_id = data.get("waba_id") or DEFAULT_WABA_ID
-    msg_id = data.get("msg_id")  # pode vir do front para contexto
+    msg_id = data.get("msg_id")  # pode vir do front, mas agora é opcional
 
     if not texto:
         return jsonify({"ok": False, "erro": "texto é obrigatório"}), 400
@@ -446,7 +447,7 @@ def enviar_mensagem(telefone):
         "type": "text",
         "text": {"body": texto}
     }
-    # Inclui contexto se fornecido para manter o encadeamento da conversa
+    # só envia contexto se msg_id não for nulo
     if msg_id:
         payload["context"] = {"message_id": str(msg_id)}
 
@@ -460,7 +461,6 @@ def enviar_mensagem(telefone):
     ok = r.ok
     status = "enviado" if ok else "erro"
 
-    # tenta extrair msg_id retornado pela API
     retorno_msg_id = None
     try:
         resp_json = r.json()
@@ -471,7 +471,6 @@ def enviar_mensagem(telefone):
     except Exception:
         retorno_msg_id = None
 
-    # Insere no banco (mensagens_avulsas)
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -485,7 +484,7 @@ def enviar_mensagem(telefone):
             phone_id,
             waba_id,
             status,
-            retorno_msg_id or msg_id
+            retorno_msg_id or msg_id  # salva se houver
         ))
         conn.commit()
     finally:
@@ -500,6 +499,7 @@ def enviar_mensagem(telefone):
         return jsonify({"ok": False, "erro": err, "status_code": r.status_code}), r.status_code
 
     return jsonify({"ok": True, "resposta": r.json(), "msg_id": retorno_msg_id or msg_id})
+
 
 
 if __name__ == "__main__":
