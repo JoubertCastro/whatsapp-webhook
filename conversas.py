@@ -99,78 +99,108 @@ def listar_contatos():
     cur = conn.cursor()
     try:
         sql = r"""
-            WITH dados AS (
-                SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
-                       ea.telefone, ea.status, ea.conteudo,
-                       phone_id, string_to_array(ea.conteudo, ',') AS vars,
-                       (envios.template::json ->> 'bodyText') AS body_text
-                FROM envios_analitico ea
-                JOIN envios ON ea.nome_disparo = envios.nome_disparo
-                  AND ea.grupo_trabalho = envios.grupo_trabalho
-            ),
-            enviados AS (
-                SELECT d.data_hora, d.telefone, d.phone_id, d.status,
-                       COALESCE(rep.txt, d.body_text) AS mensagem_final
-                FROM dados d
-                LEFT JOIN LATERAL (
-                    WITH RECURSIVE rep(i, txt) AS (
-                        SELECT 0, d.body_text
-                        UNION ALL
-                        SELECT i+1,
-                            regexp_replace(
-                                txt,
-                                '\{\{' || (i+1) || '\}\}',
-                                COALESCE(btrim(d.vars[i+1]), ''),
-                                'g'
-                            )
+                WITH dados AS (
+                    SELECT 
+                        ea.nome_disparo,
+                        ea.grupo_trabalho,
+                        ea.data_hora,
+                        ea.telefone,
+                        ea.status,
+                        ea.conteudo,
+                        phone_id,
+                        string_to_array(ea.conteudo, ',') AS vars,
+                        (envios.template::json ->> 'bodyText') AS body_text
+                    FROM envios_analitico ea
+                    JOIN envios 
+                    ON ea.nome_disparo = envios.nome_disparo 
+                    AND ea.grupo_trabalho = envios.grupo_trabalho
+                ),
+
+                -- Substituições sequenciais com CTE recursivo (uma única mensagem_final)
+                enviados AS (
+                    SELECT 
+                        d.nome_disparo,
+                        d.grupo_trabalho,
+                        d.data_hora,
+                        d.telefone,
+                        d.phone_id,
+                        d.status,
+                        COALESCE(rep.txt, d.body_text) AS mensagem_final
+                    FROM dados d
+                    LEFT JOIN LATERAL (
+                        WITH RECURSIVE rep(i, txt) AS (
+                            -- i = 0: começa com o template original
+                            SELECT 0, d.body_text
+                            UNION ALL
+                            -- cada iteração substitui {{i+1}} por vars[i+1]
+                            SELECT i + 1,
+                                regexp_replace(
+                                    txt,
+                                    '\{\{' || (i+1) || '\}\}',
+                                    COALESCE(btrim(d.vars[i+1]), ''),
+                                    'g'
+                                )
+                            FROM rep
+                            WHERE i < COALESCE(array_length(d.vars, 1), 0)
+                        )
+                        -- pega texto após a última substituição
+                        SELECT txt
                         FROM rep
-                        WHERE i < COALESCE(array_length(d.vars, 1), 0)
-                    )
-                    SELECT txt FROM rep ORDER BY i DESC LIMIT 1
-                ) rep ON TRUE
-            ),
-            cliente_msg AS (
-                SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
-                       direcao AS status, mensagem AS mensagem_final
-                FROM mensagens
-            ),
-            conversas AS (
-                SELECT data_hora,
-                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
-                       phone_id, status, mensagem_final
-                FROM enviados
-                UNION
-                SELECT data_hora, telefone, phone_id, status, mensagem_final
-                FROM cliente_msg
-            ),
-            msg_id AS (
-                SELECT remetente, msg_id
-                FROM (
-                    SELECT data_hora, remetente, msg_id,
-                        row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS indice
+                        ORDER BY i DESC
+                        LIMIT 1
+                    ) rep ON TRUE
+                ),
+
+                cliente_msg AS (
+                    SELECT 
+                        data_hora,
+                        remetente AS telefone,
+                        phone_number_id AS phone_id,
+                        direcao AS status,
+                        mensagem AS mensagem_final
                     FROM mensagens
-                ) t
-                WHERE indice = 1
-            ),
-            ranked AS (
-                SELECT a.telefone, a.phone_id, a.status, a.mensagem_final, a.data_hora,
-                       b.msg_id,
-                       row_number() OVER (PARTITION BY a.telefone ORDER BY a.data_hora DESC) AS rn
+                ),
+
+                conversas AS (
+                    SELECT 
+                        data_hora,
+                        regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
+                        phone_id,
+                        status,
+                        mensagem_final
+                    FROM enviados
+
+                    UNION
+
+                    SELECT data_hora, telefone, phone_id, status, mensagem_final
+                    FROM cliente_msg
+
+                    union
+
+                    SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final
+                    from mensagens_avulsas
+
+                ),
+
+                msg_id AS (
+                    SELECT remetente, msg_id
+                    FROM (
+                        SELECT data_hora, remetente, msg_id,
+                            row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS indice
+                        FROM mensagens
+                    ) t
+                    WHERE indice = 1
+                )
+
+                SELECT a.data_hora,
+                    a.status,
+                    a.mensagem_final
                 FROM conversas a
-                INNER JOIN msg_id b
-                  ON a.telefone = b.remetente
-                  OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
-            )
-            SELECT r.telefone AS remetente,
-                   (SELECT COALESCE(nome, r.telefone) FROM mensagens m WHERE m.remetente = r.telefone ORDER BY m.data_hora DESC LIMIT 1) AS nome_exibicao,
-                   r.phone_id,
-                   r.msg_id,
-                   r.mensagem_final,
-                   r.data_hora,
-                   r.status
-            FROM ranked r
-            WHERE r.rn = 1
-            ORDER BY r.data_hora DESC;
+                INNER JOIN msg_id b 
+                    ON a.telefone = b.remetente
+                    OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
+                order by data_hora	   
+                ;
         """
         cur.execute(sql)
         rows = cur.fetchall()
@@ -234,6 +264,9 @@ def listar_conversas():
                 UNION
                 SELECT data_hora, telefone, phone_id, status, mensagem_final
                 FROM cliente_msg
+				union
+				SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final
+				from mensagens_avulsas
             ),
             msg_id AS (
                 SELECT remetente, msg_id
@@ -317,32 +350,24 @@ def historico_conversa(telefone):
             ),
             cliente_msg AS (
                 SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
-                       direcao AS status, mensagem AS mensagem_final
+                       direcao AS status, mensagem AS mensagem_final,msg_id
                 FROM mensagens
             ),
             conversas AS (
                 SELECT data_hora,
                        regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
-                       phone_id, status, mensagem_final
+                       phone_id, status, mensagem_final,''msg_id
                 FROM enviados
                 UNION
-                SELECT data_hora, telefone, phone_id, status, mensagem_final
+                SELECT data_hora, telefone, phone_id, status, mensagem_final,msg_id
                 FROM cliente_msg
-            ),
-            msg_id AS (
-                SELECT remetente, msg_id
-                FROM (
-                    SELECT data_hora, remetente, msg_id,
-                        row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS indice
-                    FROM mensagens
-                ) t
-                WHERE indice = 1
+                UNION
+                SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
+				from mensagens_avulsas
+
             )
-            SELECT a.data_hora, a.status, a.mensagem_final
+            SELECT a.data_hora, a.status, a.mensagem_final,msg_id
             FROM conversas a
-            INNER JOIN msg_id b
-              ON a.telefone = b.remetente
-              OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
             WHERE a.telefone = %s
         """
         params = [telefone]
