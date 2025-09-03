@@ -226,33 +226,24 @@ def listar_conversas():
             ),
             cliente_msg AS (
                 SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
-                       direcao AS status, mensagem AS mensagem_final
+                       direcao AS status, mensagem AS mensagem_final,msg_id
                 FROM mensagens
             ),
             conversas AS (
-                SELECT data_hora,
+                 SELECT data_hora,
                        regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
-                       phone_id, status, mensagem_final
+                       phone_id, status, mensagem_final,''msg_id
                 FROM enviados
                 UNION
-                SELECT data_hora, telefone, phone_id, status, mensagem_final
+                SELECT data_hora, telefone, phone_id, status, mensagem_final,msg_id
                 FROM cliente_msg
-            ),
-            msg_id AS (
-                SELECT remetente, msg_id
-                FROM (
-                    SELECT data_hora, remetente, msg_id,
-                        row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS indice
-                    FROM mensagens
-                ) t
-                WHERE indice = 1
+                UNION
+                SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
+				from mensagens_avulsas
             )
             SELECT a.data_hora, a.telefone, a.phone_id,
-                   a.status, a.mensagem_final, b.msg_id
+                   a.status, a.mensagem_final, a.msg_id
             FROM conversas a
-            INNER JOIN msg_id b
-              ON a.telefone = b.remetente
-              OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
         """
 
         filtros = []
@@ -320,32 +311,24 @@ def historico_conversa(telefone):
             ),
             cliente_msg AS (
                 SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
-                       direcao AS status, mensagem AS mensagem_final
+                       direcao AS status, mensagem AS mensagem_final,msg_id
                 FROM mensagens
             ),
             conversas AS (
-                SELECT data_hora,
+                 SELECT data_hora,
                        regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
-                       phone_id, status, mensagem_final
+                       phone_id, status, mensagem_final,''msg_id
                 FROM enviados
                 UNION
-                SELECT data_hora, telefone, phone_id, status, mensagem_final
+                SELECT data_hora, telefone, phone_id, status, mensagem_final,msg_id
                 FROM cliente_msg
-            ),
-            msg_id AS (
-                SELECT remetente, msg_id
-                FROM (
-                    SELECT data_hora, remetente, msg_id,
-                        row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS indice
-                    FROM mensagens
-                ) t
-                WHERE indice = 1
+                UNION
+                SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
+				from mensagens_avulsas
             )
-            SELECT a.data_hora, a.status, a.mensagem_final
+            SELECT a.data_hora, a.telefone, a.phone_id,
+                   a.status, a.mensagem_final, a.msg_id
             FROM conversas a
-            INNER JOIN msg_id b
-              ON a.telefone = b.remetente
-              OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
             WHERE a.telefone = %s
         """
         params = [telefone]
