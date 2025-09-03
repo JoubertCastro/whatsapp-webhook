@@ -131,18 +131,21 @@ def listar_contatos():
             ),
             cliente_msg AS (
                 SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
-                       direcao AS status, mensagem AS mensagem_final
+                       direcao AS status, mensagem AS mensagem_final,msg_id
                 FROM mensagens
             ),
             conversas AS (
                 SELECT data_hora,
                        regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
-                       phone_id, status, mensagem_final
+                       phone_id, status, mensagem_final,''msg_id
                 FROM enviados
                 UNION
-                SELECT data_hora, telefone, phone_id, status, mensagem_final
+                SELECT data_hora, telefone, phone_id, status, mensagem_final,msg_id
                 FROM cliente_msg
-            ),
+                UNION
+                SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
+				from mensagens_avulsas
+                            ),
             msg_id AS (
                 SELECT remetente, msg_id
                 FROM (
