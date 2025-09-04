@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 import psycopg2, psycopg2.extras, os, requests, json
 from datetime import datetime
+import boto3
+from botocore.client import Config
 
 app = Flask(__name__)
 
@@ -91,6 +93,48 @@ def ensure_tables():
         conn.close()
 
 ensure_tables()
+
+# -----------------------------
+# CONFIGURAÇÃO S3
+# -----------------------------
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "AKIA_EXEMPLO")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "EXEMPLO_SECRETO")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
+BUCKET_NAME = os.getenv("AWS_BUCKET_NAME", "connectzap")
+
+s3_client = boto3.client(
+    "s3",
+    region_name=AWS_REGION,
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    config=Config(signature_version='s3v4')
+)
+
+# -----------------------------
+# ROTA PARA GERAR URL PRÉ-ASSINADA PARA UPLOAD DE PDF
+# -----------------------------
+@app.route("/api/upload/pdf", methods=["POST"])
+def gerar_url_presign():
+    data = request.get_json(silent=True) or {}
+    filename = (data.get("filename") or "").strip()
+
+    if not filename.lower().endswith(".pdf"):
+        return jsonify({"ok": False, "erro": "Somente arquivos PDF são permitidos"}), 400
+
+    try:
+        presigned_url = s3_client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": BUCKET_NAME,
+                "Key": filename,
+                "ContentType": "application/pdf"
+            },
+            ExpiresIn=900  # 15 minutos
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "erro": f"Falha ao gerar URL pré-assinada: {str(e)}"}), 500
+
+    return jsonify({"ok": True, "url": presigned_url})
 
 # 🔹 Lista contatos únicos (última mensagem por contato)
 @app.route("/api/conversas/contatos", methods=["GET"])
