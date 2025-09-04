@@ -6,3 +6,5 @@ pydrive2
 oauth2client
 werkzeug
 flask-cors
+boto3
+botocore
