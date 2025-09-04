@@ -202,14 +202,14 @@ def listar_contatos():
             ranked AS (
                 SELECT a.telefone, a.phone_id, a.status, a.mensagem_final, a.data_hora,
                        b.msg_id,
-                       row_number() OVER (PARTITION BY a.telefone ORDER BY a.data_hora DESC) AS rn
+                       row_number() OVER (PARTITION BY a.telefone ORDER BY case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end DESC) AS rn
                 FROM conversas a
                 INNER JOIN msg_id b
                   ON a.telefone = b.remetente
                   OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
             )
             SELECT r.telefone AS remetente,
-                   (SELECT COALESCE(nome, r.telefone) FROM mensagens m WHERE m.remetente = r.telefone ORDER BY m.data_hora DESC LIMIT 1) AS nome_exibicao,
+                   (SELECT COALESCE(nome, r.telefone) FROM mensagens m WHERE m.remetente = r.telefone ORDER BY case when status = 'in'then m.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else m.data_hora end DESC LIMIT 1) AS nome_exibicao,
                    r.phone_id,
                    r.msg_id,
                    r.mensagem_final,
@@ -217,7 +217,8 @@ def listar_contatos():
                    r.status
             FROM ranked r
             WHERE r.rn = 1
-            ORDER BY case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end DESC;
+            ORDER BY case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end DESC
+			;
         """
         cur.execute(sql)
         rows = cur.fetchall()
