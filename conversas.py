@@ -316,7 +316,7 @@ def listar_conversas():
         if filtros:
             sql += " WHERE " + " AND ".join(filtros)
 
-        sql += "ORDER BY a.data_hora end DESC"
+        sql += "ORDER BY a.data_hora DESC"
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
