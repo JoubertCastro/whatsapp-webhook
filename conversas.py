@@ -169,11 +169,11 @@ def listar_contatos():
                    r.phone_id,
                    r.msg_id,
                    r.mensagem_final,
-                   r.data_hora,
+                   case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end as data_hora,
                    r.status
             FROM ranked r
             WHERE r.rn = 1
-            ORDER BY r.data_hora DESC;
+            ORDER BY data_hora DESC;
         """
         cur.execute(sql)
         rows = cur.fetchall()
@@ -241,7 +241,8 @@ def listar_conversas():
                 SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
 				from mensagens_avulsas
             )
-            SELECT a.data_hora, a.telefone, a.phone_id,
+            SELECT case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end as data_hora,
+              a.telefone, a.phone_id,
                    a.status, a.mensagem_final, a.msg_id
             FROM conversas a
         """
@@ -326,7 +327,7 @@ def historico_conversa(telefone):
                 SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
 				from mensagens_avulsas
             )
-            SELECT a.data_hora, a.telefone, a.phone_id,
+            SELECT case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end as data_hora, a.telefone, a.phone_id,
                    a.status, a.mensagem_final, a.msg_id
             FROM conversas a
             WHERE a.telefone = %s
