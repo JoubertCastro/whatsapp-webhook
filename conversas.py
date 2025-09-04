@@ -240,11 +240,21 @@ def listar_conversas():
                 UNION
                 SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
 				from mensagens_avulsas
-            )
+            ),
+            tb_final as (
             SELECT case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end as data_hora,
               a.telefone, a.phone_id,
                    a.status, a.mensagem_final, a.msg_id
             FROM conversas a
+            )
+            select 
+            data_hora,
+            a.telefone,
+            a.phone_id,
+            a.status,
+            a.mensagem_final,
+            a.msg_id
+            from tb_final a
         """
 
         filtros = []
@@ -262,7 +272,7 @@ def listar_conversas():
         if filtros:
             sql += " WHERE " + " AND ".join(filtros)
 
-        sql += "ORDER BY case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end DESC"
+        sql += "ORDER BY a.data_hora end DESC"
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
@@ -326,24 +336,34 @@ def historico_conversa(telefone):
                 UNION
                 SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
 				from mensagens_avulsas
-            )
+            ),
+            tb_final as (
             SELECT case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end as data_hora, a.telefone, a.phone_id,
                    a.status, a.mensagem_final, a.msg_id
             FROM conversas a
             WHERE a.telefone = %s
+            )
+            select 
+            a.data_hora,
+            a.telefone,
+            a.phone_id,
+            a.status,
+            a.mensagem_final,
+            a.msg_id
+            from tb_final a
         """
         params = [telefone]
         if data_inicio and data_fim:
-            sql += " AND case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end::date BETWEEN %s AND %s"
+            sql += " AND a.data_hora::date BETWEEN %s AND %s"
             params.extend([data_inicio, data_fim])
         elif data_inicio:
-            sql += " AND case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end::date >= %s"
+            sql += " AND a.data_hora::date >= %s"
             params.append(data_inicio)
         elif data_fim:
-            sql += " AND case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end::date <= %s"
+            sql += " AND a.data_hora::date <= %s"
             params.append(data_fim)
 
-        sql += " ORDER BY case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end;"
+        sql += " ORDER BY a.data_hora;"
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
