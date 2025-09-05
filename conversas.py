@@ -448,25 +448,11 @@ def enviar_mensagem(telefone):
         payload = {
             "messaging_product": "whatsapp",
             "to": telefone,
-            "type": "template",
-            "template": {
-                "name": "envio_boleto",
-                "language": {"code": "pt_BR"},
-                "components": [
-                    {
-                        "type": "header",
-                        "parameters": [
-                            {
-                                "type": "document",
-                                "document": {
-                                    "link": pdf_url,
-                                    "filename": filename
-                                }
-                            }
-                        ]
-                    }
-                ]
-            }
+            "type": "document",
+            "document": {
+                "link": pdf_url,
+                "filename": filename
+        }
         }
         
         conteudo = f"📎 PDF: {filename}\nURL: {pdf_url}"
