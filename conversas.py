@@ -136,7 +136,12 @@ def gerar_url_presign():
     except Exception as e:
         return jsonify({"ok": False, "erro": f"Falha ao gerar URL pré-assinada: {str(e)}"}), 500
 
-    return jsonify({"ok": True, "url": presigned_url})
+    return jsonify({
+    "ok": True,
+    "upload_url": presigned_url,
+    "file_url": f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{filename}"
+    })
+
 
 # 🔹 Lista contatos únicos (última mensagem por contato)
 @app.route("/api/conversas/contatos", methods=["GET"])
