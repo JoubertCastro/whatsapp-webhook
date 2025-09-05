@@ -195,7 +195,7 @@ def listar_contatos():
                 FROM cliente_msg
                 UNION
                 SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
-				from mensagens_avulsas
+				from mensagens_avulsas where status not in ('erro')
                             ),
             msg_id AS (
                 SELECT remetente, msg_id
@@ -291,7 +291,7 @@ def listar_conversas():
                 FROM cliente_msg
                 UNION
                 SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
-				from mensagens_avulsas
+				from mensagens_avulsas where status not in ('erro')
             ),
             tb_final as (
             SELECT case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end as data_hora,
@@ -387,7 +387,7 @@ def historico_conversa(telefone):
                 FROM cliente_msg
                 UNION
                 SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
-				from mensagens_avulsas
+				from mensagens_avulsas where status not in ('erro')
             ),
             tb_final as (
             SELECT case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end as data_hora, a.telefone, a.phone_id,
@@ -448,13 +448,27 @@ def enviar_mensagem(telefone):
         payload = {
             "messaging_product": "whatsapp",
             "to": telefone,
-            "type": "document",
-            "document": {
-                "link": pdf_url,
-                "filename": filename
+            "type": "template",
+            "template": {
+                "name": "envio_boleto",
+                "language": {"code": "pt_BR"},
+                "components": [
+                    {
+                        "type": "header",
+                        "parameters": [
+                            {
+                                "type": "document",
+                                "document": {
+                                    "link": pdf_url,
+                                    "filename": filename
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
         }
-        }
-
+        
         conteudo = f"📎 PDF: {filename}"
     else:
         # Se for texto
