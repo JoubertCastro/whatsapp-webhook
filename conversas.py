@@ -65,6 +65,8 @@ VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "meu_token_secreto")
 DEFAULT_TOKEN = os.getenv("META_TOKEN", "")
 DEFAULT_PHONE_ID = os.getenv("PHONE_ID", "")
 DEFAULT_WABA_ID = os.getenv("WABA_ID", "")
+DEFAULT_AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
+DEFAULT_AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
@@ -97,8 +99,8 @@ ensure_tables()
 # -----------------------------
 # CONFIGURAÇÃO S3
 # -----------------------------
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "AKIA_EXEMPLO")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "EXEMPLO_SECRETO")
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
 BUCKET_NAME = os.getenv("AWS_BUCKET_NAME", "connectzap")
 
@@ -129,7 +131,7 @@ def gerar_url_presign():
                 "Key": filename,
                 "ContentType": "application/pdf"
             },
-            ExpiresIn=900  # 15 minutos
+            ExpiresIn=30  # 30 segundos
         )
     except Exception as e:
         return jsonify({"ok": False, "erro": f"Falha ao gerar URL pré-assinada: {str(e)}"}), 500
@@ -415,7 +417,9 @@ def historico_conversa(telefone):
         cur.close()
         conn.close()
 
-# ✉️ Envia mensagem avulsa
+# --------------------------------------------------
+# ✉️ Envia mensagem avulsa (texto ou PDF)
+# --------------------------------------------------
 @app.route("/api/conversas/<telefone>", methods=["POST"])
 def enviar_mensagem(telefone):
     data = request.get_json(silent=True) or {}
@@ -426,20 +430,53 @@ def enviar_mensagem(telefone):
     waba_id = data.get("waba_id") or DEFAULT_WABA_ID
     msg_id = data.get("msg_id")  # opcional
 
-    if not texto:
-        return jsonify({"ok": False, "erro": "texto é obrigatório"}), 400
+    pdf_url = data.get("file_url")
+    filename = data.get("filename")
+
     if not token or not phone_id:
         return jsonify({"ok": False, "erro": "token ou phone_id não configurados"}), 400
 
     url = f"https://graph.facebook.com/v23.0/{phone_id}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": telefone,
-        "type": "text",
-        "text": {"body": texto}
-    }
-    if msg_id:
-        payload["context"] = {"message_id": str(msg_id)}
+
+    # Se for PDF
+    if pdf_url and filename:
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": telefone,
+            "type": "template",
+            "template": {
+                "name": "envio_boleto",
+                "language": {"code": "pt_BR"},
+                "components": [
+                    {
+                        "type": "header",
+                        "parameters": [
+                            {
+                                "type": "document",
+                                "document": {
+                                    "link": pdf_url,
+                                    "filename": filename
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        conteudo = f"📎 PDF: {filename}"
+    else:
+        # Se for texto
+        if not texto:
+            return jsonify({"ok": False, "erro": "texto é obrigatório"}), 400
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": telefone,
+            "type": "text",
+            "text": {"body": texto}
+        }
+        if msg_id:
+            payload["context"] = {"message_id": str(msg_id)}
+        conteudo = texto
 
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -472,7 +509,7 @@ def enviar_mensagem(telefone):
         """, (
             f"Cliente {telefone}",
             telefone,
-            texto,
+            conteudo,
             phone_id,
             waba_id,
             status,
