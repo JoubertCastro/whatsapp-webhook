@@ -469,7 +469,7 @@ def enviar_mensagem(telefone):
             }
         }
         
-        conteudo = f"📎 PDF: {filename}"
+        conteudo = f"📎 PDF: {filename}\nURL: {pdf_url}"
     else:
         # Se for texto
         if not texto:
