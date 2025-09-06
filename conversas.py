@@ -115,6 +115,8 @@ s3_client = boto3.client(
 # -----------------------------
 # ROTA PARA GERAR URL PRÉ-ASSINADA PARA UPLOAD DE PDF
 # -----------------------------
+import uuid
+
 @app.route("/api/upload/pdf", methods=["POST"])
 def gerar_url_presign():
     data = request.get_json(silent=True) or {}
@@ -123,12 +125,15 @@ def gerar_url_presign():
     if not filename.lower().endswith(".pdf"):
         return jsonify({"ok": False, "erro": "Somente arquivos PDF são permitidos"}), 400
 
+    # 🔹 Gera nome único no bucket preservando o original
+    unique_name = f"{uuid.uuid4().hex}_{filename}"
+
     try:
         presigned_url = s3_client.generate_presigned_url(
             "put_object",
             Params={
                 "Bucket": BUCKET_NAME,
-                "Key": filename,
+                "Key": unique_name,
                 "ContentType": "application/pdf"
             },
             ExpiresIn=30  # 30 segundos
@@ -137,9 +142,10 @@ def gerar_url_presign():
         return jsonify({"ok": False, "erro": f"Falha ao gerar URL pré-assinada: {str(e)}"}), 500
 
     return jsonify({
-    "ok": True,
-    "upload_url": presigned_url,
-    "file_url": f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{filename}"
+        "ok": True,
+        "upload_url": presigned_url,
+        "file_url": f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{unique_name}",
+        "original_filename": filename
     })
 
 
@@ -436,15 +442,15 @@ def enviar_mensagem(telefone):
     msg_id = data.get("msg_id")  # opcional
 
     pdf_url = data.get("file_url")
-    filename = data.get("filename")
+    filename = data.get("original_filename")  # 🔹 Nome original do arquivo
 
     if not token or not phone_id:
         return jsonify({"ok": False, "erro": "token ou phone_id não configurados"}), 400
 
     url = f"https://graph.facebook.com/v23.0/{phone_id}/messages"
 
-    # Se for PDF
     if pdf_url and filename:
+        # Se for PDF
         payload = {
             "messaging_product": "whatsapp",
             "to": telefone,
@@ -452,10 +458,9 @@ def enviar_mensagem(telefone):
             "document": {
                 "link": pdf_url,
                 "filename": filename
+            }
         }
-        }
-        
-        conteudo = f"📎 PDF: {filename}\nURL: {pdf_url}"
+        conteudo = f"📎 PDF: {filename}\n🔗 {pdf_url}"
     else:
         # Se for texto
         if not texto:
