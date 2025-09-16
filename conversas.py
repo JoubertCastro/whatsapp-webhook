@@ -215,7 +215,7 @@ def listar_contatos():
             ranked AS (
                 SELECT a.telefone, a.phone_id, a.status, a.mensagem_final, a.data_hora,
                        b.msg_id,
-                       row_number() OVER (PARTITION BY a.telefone ORDER BY case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end DESC) AS rn
+                       row_number() OVER (PARTITION BY a.telefone,a.phone_id ORDER BY case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end DESC) AS rn
                 FROM conversas a
                 INNER JOIN msg_id b
                   ON a.telefone = b.remetente
