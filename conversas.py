@@ -342,6 +342,7 @@ def listar_conversas():
 def historico_conversa(telefone):
     data_inicio = request.args.get("data_inicio")
     data_fim = request.args.get("data_fim")
+    filtro_phone_id = request.args.get("phone_id")  # ✅ novo filtro
 
     conn = get_conn()
     cur = conn.cursor()
@@ -393,32 +394,33 @@ def historico_conversa(telefone):
                 FROM cliente_msg
                 UNION
                 SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
-				from mensagens_avulsas where status not in ('erro')
+                from mensagens_avulsas where status not in ('erro')
             ),
             tb_final as (
-            SELECT case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end as data_hora, a.telefone, a.phone_id,
+            SELECT case when status = 'in'
+                        then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                        else a.data_hora end as data_hora,
+                   a.telefone, a.phone_id,
                    a.status, a.mensagem_final, a.msg_id
             FROM conversas a
             WHERE a.telefone = %s
-            )
-            select 
-            a.data_hora,
-            a.telefone,
-            a.phone_id,
-            a.status,
-            a.mensagem_final,
-            a.msg_id
-            from tb_final a
-        """
+            """
         params = [telefone]
+
+        if filtro_phone_id:
+            sql += " AND a.phone_id = %s"
+            params.append(filtro_phone_id)
+
+        sql += ") select a.data_hora, a.telefone, a.phone_id, a.status, a.mensagem_final, a.msg_id from tb_final a"
+
         if data_inicio and data_fim:
-            sql += " AND a.data_hora::date BETWEEN %s AND %s"
+            sql += " WHERE a.data_hora::date BETWEEN %s AND %s"
             params.extend([data_inicio, data_fim])
         elif data_inicio:
-            sql += " AND a.data_hora::date >= %s"
+            sql += " WHERE a.data_hora::date >= %s"
             params.append(data_inicio)
         elif data_fim:
-            sql += " AND a.data_hora::date <= %s"
+            sql += " WHERE a.data_hora::date <= %s"
             params.append(data_fim)
 
         sql += " ORDER BY a.data_hora;"
