@@ -337,12 +337,12 @@ def listar_conversas():
         cur.close()
         conn.close()
 
-# 📜 Histórico com filtro por data_inicio e data_fim
+# 📜 Histórico com filtro por data_inicio, data_fim e phone_id
 @app.route("/api/conversas/<telefone>", methods=["GET"])
 def historico_conversa(telefone):
     data_inicio = request.args.get("data_inicio")
     data_fim = request.args.get("data_fim")
-    filtro_phone_id = request.args.get("phone_id")  # ✅ novo filtro
+    filtro_phone_id = request.args.get("phone_id")  # ✅ agora usado sempre
 
     conn = get_conn()
     cur = conn.cursor()
@@ -370,8 +370,7 @@ def historico_conversa(telefone):
                             regexp_replace(
                                 txt,
                                 '\{\{' || (i+1) || '\}\}',
-                                COALESCE(btrim(d.vars[i+1]), ''),
-                                'g'
+                                COALESCE(btrim(d.vars[i+1]), ''), 'g'
                             )
                         FROM rep
                         WHERE i < COALESCE(array_length(d.vars, 1), 0)
@@ -381,38 +380,46 @@ def historico_conversa(telefone):
             ),
             cliente_msg AS (
                 SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
-                       direcao AS status, mensagem AS mensagem_final,msg_id
+                       direcao AS status, mensagem AS mensagem_final, msg_id
                 FROM mensagens
             ),
             conversas AS (
                  SELECT data_hora,
                        regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
-                       phone_id, status, mensagem_final,''msg_id
+                       phone_id, status, mensagem_final, '' msg_id
                 FROM enviados
                 UNION
-                SELECT data_hora, telefone, phone_id, status, mensagem_final,msg_id
+                SELECT data_hora, telefone, phone_id, status, mensagem_final, msg_id
                 FROM cliente_msg
                 UNION
-                SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
-                from mensagens_avulsas where status not in ('erro')
+                SELECT data_hora, remetente AS telefone, phone_id, status, conteudo AS mensagem_final, '' msg_id
+                FROM mensagens_avulsas WHERE status NOT IN ('erro')
             ),
-            tb_final as (
-            SELECT case when status = 'in'
-                        then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
-                        else a.data_hora end as data_hora,
-                   a.telefone, a.phone_id,
-                   a.status, a.mensagem_final, a.msg_id
-            FROM conversas a
-            WHERE a.telefone = %s
-            """
+            tb_final AS (
+                SELECT CASE
+                         WHEN status = 'in'
+                           THEN a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                         ELSE a.data_hora
+                       END AS data_hora,
+                       a.telefone, a.phone_id,
+                       a.status, a.mensagem_final, a.msg_id
+                FROM conversas a
+                WHERE a.telefone = %s
+        """
         params = [telefone]
 
+        # ✅ se vier phone_id, aplica filtro
         if filtro_phone_id:
             sql += " AND a.phone_id = %s"
             params.append(filtro_phone_id)
 
-        sql += ") select a.data_hora, a.telefone, a.phone_id, a.status, a.mensagem_final, a.msg_id from tb_final a"
+        sql += """
+            )
+            SELECT a.data_hora, a.telefone, a.phone_id, a.status, a.mensagem_final, a.msg_id
+            FROM tb_final a
+        """
 
+        # filtros opcionais de data
         if data_inicio and data_fim:
             sql += " WHERE a.data_hora::date BETWEEN %s AND %s"
             params.extend([data_inicio, data_fim])
@@ -424,11 +431,13 @@ def historico_conversa(telefone):
             params.append(data_fim)
 
         sql += " ORDER BY a.data_hora;"
+
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
         cur.close()
         conn.close()
+
 
 # --------------------------------------------------
 # ✉️ Envia mensagem avulsa (texto ou PDF)
