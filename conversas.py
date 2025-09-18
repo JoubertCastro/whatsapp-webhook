@@ -438,6 +438,25 @@ def historico_conversa(telefone):
         cur.close()
         conn.close()
 
+# --------------------------------------------------
+# 📷 NOVA ROTA PARA PEGAR URL DE IMAGEM RECEBIDA
+# --------------------------------------------------
+@app.route("/api/conversas/image/<image_id>", methods=["GET"])
+def get_image_url(image_id):
+    token = DEFAULT_TOKEN
+    url = f"https://graph.facebook.com/v23.0/{image_id}"
+    try:
+        resp = requests.get(url, params={"access_token": token}, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return jsonify({
+            "ok": True,
+            "url": data.get("url"),
+            "mime_type": data.get("mime_type"),
+            "file_size": data.get("file_size")
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
 
 # --------------------------------------------------
 # ✉️ Envia mensagem avulsa (texto ou PDF)
