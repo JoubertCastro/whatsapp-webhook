@@ -230,6 +230,7 @@ def listar_contatos():
                    r.status
             FROM ranked r
             WHERE r.rn = 1
+			and case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end >= now() - interval '1 day'
             ORDER BY case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end DESC
 			;
         """
