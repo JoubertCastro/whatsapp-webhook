@@ -429,6 +429,103 @@ def criar_envio():
     finally:
         cur.close()
         conn.close()
+#criando os agentes
+
+@app.route("/api/agentes/<int:codigo>", methods=["GET"])
+def buscar_agente(codigo):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT codigo_do_agente, nome, carteira, origem_bd
+            FROM agentes
+            WHERE codigo_do_agente = %s
+        """, (codigo,))
+        agente = cur.fetchone()
+        if not agente:
+            return jsonify({"ok": False, "erro": "Esse agente ainda não está cadastrado"}), 404
+        return jsonify({"ok": True, "agente": agente})
+    except Exception as e:
+        print("❌ Erro /api/agentes/<codigo> [GET]:", e)
+        return jsonify({"ok": False, "erro": "Erro ao buscar agente"}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+@app.route("/api/agentes", methods=["POST"])
+def cadastrar_agente():
+    data = request.get_json(silent=True) or {}
+    codigo = data.get("codigo_do_agente")
+    nome = data.get("nome")
+    carteira = data.get("carteira")
+    origem_bd = data.get("origem_bd", "manual")  # padrão manual, se não informar
+
+    if not codigo or not nome or not carteira:
+        return jsonify({"ok": False, "erro": "codigo_do_agente, nome e carteira são obrigatórios"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT 1 FROM agentes WHERE codigo_do_agente = %s", (codigo,))
+        if cur.fetchone():
+            return jsonify({"ok": False, "erro": "Agente já cadastrado"}), 409
+
+        cur.execute("""
+            INSERT INTO agentes (codigo_do_agente, nome, carteira, origem_bd)
+            VALUES (%s, %s, %s, %s)
+            RETURNING codigo_do_agente
+        """, (codigo, nome, carteira, origem_bd))
+        conn.commit()
+        return jsonify({"ok": True, "codigo_do_agente": cur.fetchone()[0]})
+    except Exception as e:
+        conn.rollback()
+        print("❌ Erro /api/agentes [POST]:", e)
+        return jsonify({"ok": False, "erro": "Erro ao cadastrar agente"}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+@app.route("/api/agentes/<int:codigo>", methods=["PUT"])
+def editar_agente(codigo):
+    data = request.get_json(silent=True) or {}
+    nome = data.get("nome")
+    carteira = data.get("carteira")
+
+    if not nome and not carteira:
+        return jsonify({"ok": False, "erro": "Informe pelo menos nome ou carteira para atualizar"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT 1 FROM agentes WHERE codigo_do_agente = %s", (codigo,))
+        if not cur.fetchone():
+            return jsonify({"ok": False, "erro": "Esse agente não está cadastrado"}), 404
+
+        # Monta dinamicamente a query para atualizar apenas o que veio
+        updates = []
+        params = []
+        if nome:
+            updates.append("nome = %s")
+            params.append(nome)
+        if carteira:
+            updates.append("carteira = %s")
+            params.append(carteira)
+        params.append(codigo)
+
+        cur.execute(f"""
+            UPDATE agentes
+            SET {', '.join(updates)}
+            WHERE codigo_do_agente = %s
+        """, params)
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        print("❌ Erro /api/agentes/<codigo> [PUT]:", e)
+        return jsonify({"ok": False, "erro": "Erro ao editar agente"}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 
 
