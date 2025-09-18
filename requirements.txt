@@ -12,3 +12,4 @@ fastapi
 uvicorn
 sqlalchemy
 pyodbc
+pymssql
