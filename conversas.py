@@ -439,24 +439,66 @@ def historico_conversa(telefone):
         conn.close()
 
 # --------------------------------------------------
-# 📷 NOVA ROTA PARA PEGAR URL DE IMAGEM RECEBIDA
+# 📷 ROTA: obter URL de imagem a partir do msg_id (consulta DB -> Graph API)
 # --------------------------------------------------
-@app.route("/api/conversas/image/<image_id>", methods=["GET"])
-def get_image_url(image_id):
-    token = DEFAULT_TOKEN
-    url = f"https://graph.facebook.com/v23.0/{image_id}"
+@app.route("/api/conversas/image/<msg_id>", methods=["GET"])
+def get_image_url_by_msgid(msg_id):
+    # Validação mínima
+    if not msg_id:
+        return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
+
+    conn = None
+    cur = None
     try:
-        resp = requests.get(url, params={"access_token": token}, timeout=10)
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # Busca image_id dentro do campo JSONB 'raw'
+        cur.execute(
+            "SELECT raw->'image'->> 'id' AS image_id FROM mensagens WHERE msg_id = %s LIMIT 1",
+            (msg_id,)
+        )
+        row = cur.fetchone()
+        if not row or not row.get("image_id"):
+            return jsonify({"ok": False, "erro": "image_id não encontrado para esse msg_id"}), 404
+
+        image_id = row["image_id"]
+
+        # Consulta Graph API para pegar a URL temporária
+        token = DEFAULT_TOKEN
+        if not token:
+            return jsonify({"ok": False, "erro": "token do Meta não configurado no backend"}), 500
+
+        graph_url = f"https://graph.facebook.com/v23.0/{image_id}"
+        resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
         resp.raise_for_status()
         data = resp.json()
+
         return jsonify({
             "ok": True,
+            "msg_id": msg_id,
+            "image_id": image_id,
             "url": data.get("url"),
             "mime_type": data.get("mime_type"),
             "file_size": data.get("file_size")
         })
+
+    except requests.HTTPError as e:
+        # Erro vindo do Graph API
+        status_code = getattr(e.response, "status_code", 500)
+        try:
+            err_json = e.response.json()
+        except Exception:
+            err_json = str(e)
+        return jsonify({"ok": False, "erro": "Graph API error", "detail": err_json}), status_code
     except Exception as e:
         return jsonify({"ok": False, "erro": str(e)}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
 
 # --------------------------------------------------
 # ✉️ Envia mensagem avulsa (texto ou PDF)
