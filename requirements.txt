@@ -8,3 +8,7 @@ werkzeug
 flask-cors
 boto3
 botocore
+fastapi
+uvicorn
+sqlalchemy
+python-tds
