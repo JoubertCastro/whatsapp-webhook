@@ -6,7 +6,7 @@ app = FastAPI()
 
 # Função para abrir conexão com o SQL Server
 
-conn_str = f"mssql+pytds://{os.environ['DB_USER']}:{os.environ['DB_PASS']}@{os.environ['DB_SERVER']}/{os.environ['DB_NAME']}"
+conn_str = f"mssql+pyodbc://{os.environ['DB_USER']}:{os.environ['DB_PASS']}@{os.environ['DB_SERVER']}/{os.environ['DB_NAME']}?driver=ODBC+Driver+17+for+SQL+Server"
 engine = create_engine(conn_str)
 
 # Endpoint que lista os 10 primeiros registros

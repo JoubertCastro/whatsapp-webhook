@@ -11,4 +11,4 @@ botocore
 fastapi
 uvicorn
 sqlalchemy
-python-tds
+pyodbc
