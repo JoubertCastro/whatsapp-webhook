@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response,Response
 from flask_cors import CORS
 import psycopg2, psycopg2.extras, os, requests, json
 from datetime import datetime
@@ -447,11 +447,10 @@ def get_image_url_by_msgid(msg_id):
     if not msg_id:
         return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
 
-    conn = None
-    cur = None
+    conn = get_conn()
+    cur = conn.cursor()
     try:
-        conn = get_conn()
-        cur = conn.cursor()
+        # 1. Busca image_id
         cur.execute(
             "SELECT raw->'image'->>'id' AS image_id FROM mensagens WHERE msg_id = %s LIMIT 1",
             (msg_id,)
@@ -459,38 +458,40 @@ def get_image_url_by_msgid(msg_id):
         row = cur.fetchone()
         if not row or not row.get("image_id"):
             return jsonify({"ok": False, "erro": "image_id não encontrado"}), 404
-
         image_id = row["image_id"]
 
+        # 2. Chama Graph API para pegar a URL temporária
         token = DEFAULT_TOKEN
-        if not token:
-            return jsonify({"ok": False, "erro": "token do Meta não configurado"}), 500
-
-        # 1ª chamada: pega metadados
         graph_url = f"https://graph.facebook.com/v23.0/{image_id}"
-        resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-
+        meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
+        meta_resp.raise_for_status()
+        data = meta_resp.json()
         lookaside_url = data.get("url")
-        if not lookaside_url:
-            return jsonify({"ok": False, "erro": "URL Lookaside não encontrada"}), 500
+        mime_type = data.get("mime_type", "image/jpeg")
 
-        # ✅ Já devolvemos para o frontend a URL Lookaside pronta
-        return jsonify({
-            "ok": True,
-            "msg_id": msg_id,
-            "image_id": image_id,
-            "lookaside_url": lookaside_url,
-            "mime_type": data.get("mime_type"),
-            "file_size": data.get("file_size")
-        })
+        if not lookaside_url:
+            return jsonify({"ok": False, "erro": "URL não encontrada"}), 500
+
+        # 3. Baixa a imagem do Lookaside com token
+        img_resp = requests.get(
+            lookaside_url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        img_resp.raise_for_status()
+
+        # 4. Converte para Base64
+        b64_data = base64.b64encode(img_resp.content).decode("utf-8")
+        data_uri = f"data:{mime_type};base64,{b64_data}"
+
+        # 5. Retorna JSON com a string pronta
+        return jsonify({"ok": True, "data_uri": data_uri})
 
     except Exception as e:
         return jsonify({"ok": False, "erro": str(e)}), 500
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        cur.close()
+        conn.close()
 
 
 # --------------------------------------------------
