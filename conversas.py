@@ -439,6 +439,10 @@ def historico_conversa(telefone):
         cur.close()
         conn.close()
 
+# --------------------------------------------------
+# ✉️ Faz a leitura de imagens
+# --------------------------------------------------
+
 @app.route("/api/conversas/image/<msg_id>", methods=["GET"])
 def get_image_url_by_msgid(msg_id):
     if not msg_id:
@@ -491,6 +495,67 @@ def get_image_url_by_msgid(msg_id):
     finally:
         cur.close()
         conn.close()
+
+# --------------------------------------------------
+# ✉️ Faz a reproducao de audios
+# --------------------------------------------------
+
+# --------------------------------------------------
+# 🎙️ ROTA: obter áudio (em base64) a partir do msg_id
+# --------------------------------------------------
+@app.route("/api/conversas/audio/<msg_id>", methods=["GET"])
+def get_audio_by_msgid(msg_id):
+    if not msg_id:
+        return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # 1. Buscar audio_id no banco
+        cur.execute(
+            "SELECT raw->'audio'->>'id' AS audio_id FROM mensagens WHERE msg_id = %s LIMIT 1",
+            (msg_id,)
+        )
+        row = cur.fetchone()
+        if not row or not row.get("audio_id"):
+            return jsonify({"ok": False, "erro": "audio_id não encontrado"}), 404
+
+        audio_id = row["audio_id"]
+
+        # 2. Buscar URL temporária no Graph
+        token = DEFAULT_TOKEN
+        graph_url = f"https://graph.facebook.com/v23.0/{audio_id}"
+        meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
+        meta_resp.raise_for_status()
+        data = meta_resp.json()
+
+        lookaside_url = data.get("url")
+        mime_type = data.get("mime_type", "audio/ogg")  # 👈 padrão do WhatsApp é OGG/opus
+
+        if not lookaside_url:
+            return jsonify({"ok": False, "erro": "URL não encontrada no Graph"}), 500
+
+        # 3. Baixar o áudio com token
+        audio_resp = requests.get(
+            lookaside_url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15
+        )
+        audio_resp.raise_for_status()
+
+        # 4. Converter para Base64 (formato data URI)
+        b64_data = base64.b64encode(audio_resp.content).decode("utf-8")
+        data_uri = f"data:{mime_type};base64,{b64_data}"
+
+        # 5. Retornar JSON para o frontend
+        return jsonify({"ok": True, "data_uri": data_uri})
+
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
 
 # --------------------------------------------------
 # ✉️ Envia mensagem avulsa (texto ou PDF)
