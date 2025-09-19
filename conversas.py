@@ -439,9 +439,6 @@ def historico_conversa(telefone):
         cur.close()
         conn.close()
 
-# --------------------------------------------------
-# 📷 ROTA: obter URL final da imagem (Lookaside) a partir do msg_id
-# --------------------------------------------------
 @app.route("/api/conversas/image/<msg_id>", methods=["GET"])
 def get_image_url_by_msgid(msg_id):
     if not msg_id:
@@ -460,7 +457,7 @@ def get_image_url_by_msgid(msg_id):
             return jsonify({"ok": False, "erro": "image_id não encontrado"}), 404
         image_id = row["image_id"]
 
-        # 2. Chama Graph API para pegar a URL temporária
+        # 2. Chama Graph API para pegar a URL temporária (não precisa header aqui, só o param)
         token = DEFAULT_TOKEN
         graph_url = f"https://graph.facebook.com/v23.0/{image_id}"
         meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
@@ -470,13 +467,13 @@ def get_image_url_by_msgid(msg_id):
         mime_type = data.get("mime_type", "image/jpeg")
 
         if not lookaside_url:
-            return jsonify({"ok": False, "erro": "URL não encontrada"}), 500
+            return jsonify({"ok": False, "erro": "URL não encontrada no Graph"}), 500
 
-        # 3. Baixa a imagem do Lookaside com token
+        # 3. Baixa a imagem do Lookaside (aqui sim precisa do header com Bearer)
         img_resp = requests.get(
             lookaside_url,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=10
+            timeout=15
         )
         img_resp.raise_for_status()
 
@@ -492,7 +489,6 @@ def get_image_url_by_msgid(msg_id):
     finally:
         cur.close()
         conn.close()
-
 
 # --------------------------------------------------
 # ✉️ Envia mensagem avulsa (texto ou PDF)
