@@ -555,6 +555,36 @@ def get_audio_by_msgid(msg_id):
     finally:
         cur.close()
         conn.close()
+# --------------------------------------------------
+#  🙏 ROTA: carregar o emoji a partir do msg_id
+# --------------------------------------------------
+@app.route("/api/conversas/emoji/<msg_id>", methods=["GET"])
+def get_emoji_by_msgid(msg_id):
+    if not msg_id:
+        return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # 1. Buscar emoji no banco (campo reaction->emoji)
+        cur.execute(
+            "SELECT raw->'reaction'->>'emoji' AS emoji FROM mensagens WHERE msg_id = %s LIMIT 1",
+            (msg_id,)
+        )
+        row = cur.fetchone()
+        if not row or not row.get("emoji"):
+            return jsonify({"ok": False, "erro": "emoji não encontrado"}), 404
+
+        emoji = row["emoji"]
+
+        # 2. Retornar direto no JSON (sem base64, sem Graph)
+        return jsonify({"ok": True, "emoji": emoji})
+
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 
 # --------------------------------------------------
