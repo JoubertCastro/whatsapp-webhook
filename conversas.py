@@ -4,7 +4,7 @@ import psycopg2, psycopg2.extras, os, requests, json
 from datetime import datetime
 import boto3
 from botocore.client import Config
-
+import base64
 app = Flask(__name__)
 
 # --- CORS ---
@@ -447,7 +447,7 @@ def get_image_url_by_msgid(msg_id):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # 1. Busca image_id
+        # 1. Buscar image_id no banco
         cur.execute(
             "SELECT raw->'image'->>'id' AS image_id FROM mensagens WHERE msg_id = %s LIMIT 1",
             (msg_id,)
@@ -455,21 +455,23 @@ def get_image_url_by_msgid(msg_id):
         row = cur.fetchone()
         if not row or not row.get("image_id"):
             return jsonify({"ok": False, "erro": "image_id não encontrado"}), 404
+
         image_id = row["image_id"]
 
-        # 2. Chama Graph API para pegar a URL temporária (não precisa header aqui, só o param)
+        # 2. Buscar URL temporária no Graph
         token = DEFAULT_TOKEN
         graph_url = f"https://graph.facebook.com/v23.0/{image_id}"
         meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
         meta_resp.raise_for_status()
         data = meta_resp.json()
+
         lookaside_url = data.get("url")
         mime_type = data.get("mime_type", "image/jpeg")
 
         if not lookaside_url:
             return jsonify({"ok": False, "erro": "URL não encontrada no Graph"}), 500
 
-        # 3. Baixa a imagem do Lookaside (aqui sim precisa do header com Bearer)
+        # 3. Baixar a imagem usando o lookaside_url + Authorization
         img_resp = requests.get(
             lookaside_url,
             headers={"Authorization": f"Bearer {token}"},
@@ -477,11 +479,11 @@ def get_image_url_by_msgid(msg_id):
         )
         img_resp.raise_for_status()
 
-        # 4. Converte para Base64
+        # 4. Converter para Base64 (formato data URI)
         b64_data = base64.b64encode(img_resp.content).decode("utf-8")
         data_uri = f"data:{mime_type};base64,{b64_data}"
 
-        # 5. Retorna JSON com a string pronta
+        # 5. Retornar JSON para o frontend
         return jsonify({"ok": True, "data_uri": data_uri})
 
     except Exception as e:
