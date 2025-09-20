@@ -1106,6 +1106,70 @@ def tickets_concluir():
         return jsonify({"ok": False, "erro": f"concluir falhou: {str(e)}"}), 500
     finally:
         cur.close(); conn.close()
+# 🔎 Monitoria: listar conversas_em_andamento com filtros
+@app.route("/api/monitoria/em_andamento", methods=["GET"])
+def monitoria_em_andamento():
+    carteira     = (request.args.get("carteira") or "").strip()
+    nome_agente  = (request.args.get("nome_agente") or "").strip()
+    telefone     = (request.args.get("telefone") or "").strip()
+    status       = (request.args.get("status") or "todas").strip().lower()  # ativas | finalizadas | todas
+    try:
+        limit = int(request.args.get("limit", "100"))
+        if limit <= 0 or limit > 1000:
+            limit = 100
+    except Exception:
+        limit = 100
+
+    conn = get_conn()
+    cur  = conn.cursor()
+    try:
+        sql = """
+            SELECT
+              telefone,
+              phone_id,
+              carteira,
+              codigo_do_agente,
+              nome_agente,
+              started_at,
+              ended_at
+            FROM conversas_em_andamento
+            WHERE 1=1
+        """
+        params = []
+
+        if carteira:
+            sql += " AND carteira = %s"
+            params.append(carteira)
+
+        if nome_agente:
+            sql += " AND nome_agente ILIKE %s"
+            params.append(f"%{nome_agente}%")
+
+        if telefone:
+            # permite buscar parte do número (prefixo/sufixo)
+            sql += " AND telefone ILIKE %s"
+            params.append(f"%{telefone}%")
+
+        if status == "ativas":
+            sql += " AND ended_at IS NULL"
+        elif status == "finalizadas":
+            sql += " AND ended_at IS NOT NULL"
+        # 'todas' -> sem cláusula extra
+
+        sql += """
+            ORDER BY (ended_at IS NULL) DESC, started_at DESC
+            LIMIT %s
+        """
+        params.append(limit)
+
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"ok": False, "erro": f"monitoria/em_andamento falhou: {str(e)}"}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 
 if __name__ == "__main__":
