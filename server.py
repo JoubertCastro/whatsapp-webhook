@@ -14,10 +14,9 @@ CORS(app)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
+    "postgresql://postgres:postgres@localhost:5432/postgres"
 )
 VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "meu_token_secreto")
-TZ = ZoneInfo("America/Sao_Paulo")
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
@@ -143,19 +142,15 @@ def conflict(msg):     return jsonify({"ok": False, "erro": msg}), 409
 def not_found(msg):    return jsonify({"ok": False, "erro": msg}), 404
 
 def ajustar_timestamp(ts: str):
-    """
-    ts pode ser epoch em segundos (string). Se vier inválido, usa 'agora' em TZ São Paulo.
-    """
     try:
-        # WhatsApp geralmente manda epoch em segundos
-        dt_utc = datetime.fromtimestamp(int(ts), tz=timezone.utc)
-        return dt_utc.astimezone(TZ)
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc) - timedelta(hours=3)
     except Exception:
-        return datetime.now(TZ)
+        return datetime.now(timezone.utc) - timedelta(hours=3)
+
 
 def salvar_mensagem(remetente, mensagem, msg_id=None, nome=None, timestamp=None,
                     raw=None, phone_number_id=None, display_phone_number=None):
-    data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(TZ)
+    data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=3)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -171,7 +166,7 @@ def salvar_mensagem(remetente, mensagem, msg_id=None, nome=None, timestamp=None,
 
 def salvar_status(msg_id, recipient_id, status, raw, timestamp=None,
                   phone_number_id=None, display_phone_number=None):
-    data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(TZ)
+    data_hora = ajustar_timestamp(timestamp) if timestamp else datetime.now(timezone.utc) - timedelta(hours=3)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
