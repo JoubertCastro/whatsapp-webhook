@@ -891,7 +891,7 @@ def tickets_claim():
                     (telefone, phone_id, carteira, codigo_do_agente, nome_agente)
                     VALUES
                     (%s, %s, %s, %s, (SELECT nome FROM agentes WHERE codigo_do_agente=%s))
-                    ON CONFLICT ON CONSTRAINT ux_conversa_ativa DO NOTHING
+                    ON CONFLICT (telefone, phone_id) WHERE ended_at IS NULL DO NOTHING
                     RETURNING telefone
                 """, (c["remetente"], phone_id, carteira, codigo, codigo))
                 row = cur.fetchone()
