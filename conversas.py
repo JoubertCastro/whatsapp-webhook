@@ -22,6 +22,13 @@ CARTEIRA_TO_PHONE = {
 }
 
 
+ALLOWED_MOTIVOS_CONCLUSAO = [
+    "Realizou negociação",
+    "Solicitou 2ª via de boleto",
+    "Recusou a proposta",
+    "Dúvidas gerais",
+    "Cliente ficou inativo",
+]
 
 # --- CORS ---
 origins_env = os.getenv("ALLOWED_ORIGINS", "https://joubertcastro.github.io,https://*.github.io,*")
@@ -123,6 +130,18 @@ def ensure_tables():
               ON conversas_em_andamento (telefone, phone_id)
               WHERE ended_at IS NULL;
         """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS tickets_bloqueados (
+            telefone      TEXT NOT NULL,
+            phone_id      TEXT NOT NULL,
+            bloqueado_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            motivo        TEXT NOT NULL,
+            PRIMARY KEY (telefone, phone_id)
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_tickets_bloqueados_bloq ON tickets_bloqueados(bloqueado_at DESC);")
+
+
         conn.commit()
     finally:
         cur.close()
@@ -366,7 +385,7 @@ def listar_conversas():
         if filtros:
             sql += " WHERE " + " AND ".join(filtros)
 
-        sql += "ORDER BY a.data_hora DESC"
+        sql += " ORDER BY a.data_hora DESC"
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
@@ -825,6 +844,15 @@ def tickets_claim():
                 INNER JOIN msg_id b
                   ON a.telefone = b.remetente
                   OR a.telefone = regexp_replace(b.remetente, '(?<=^55\\d{2})9', '', 'g')
+            ),last_in AS (
+                SELECT
+                  regexp_replace(remetente, '(?<=^55\\d{2})9', '', 'g') AS telefone,
+                  phone_number_id AS phone_id,
+                  MAX(CASE WHEN direcao='in'
+                           THEN data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                           ELSE NULL END) AS last_in
+                FROM mensagens
+                GROUP BY 1,2
             )
             SELECT r.telefone AS remetente,
                    (SELECT COALESCE(nome, r.telefone) FROM mensagens m
@@ -840,13 +868,17 @@ def tickets_claim():
                          ELSE r.data_hora END) AS data_hora,
                    r.status
             FROM ranked r
+            LEFT JOIN tickets_bloqueados tb
+              ON tb.telefone = r.telefone AND tb.phone_id = r.phone_id
+            LEFT JOIN last_in li
+              ON li.telefone = r.telefone AND li.phone_id = r.phone_id
             WHERE r.rn = 1
               AND r.phone_id = %s
               AND (CASE WHEN r.status='in'
                         THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
                         ELSE r.data_hora END) >= now() - interval '1 day'
+              AND (tb.telefone IS NULL OR (li.last_in IS NOT NULL AND li.last_in > tb.bloqueado_at))
             ORDER BY (r.status='in') DESC, data_hora DESC
-            LIMIT 50
         """
         cur.execute(sql, (phone_id,))
         candidatos = cur.fetchall()
@@ -858,9 +890,8 @@ def tickets_claim():
                     INSERT INTO conversas_em_andamento
                     (telefone, phone_id, carteira, codigo_do_agente, nome_agente)
                     VALUES
-                    (%s, %s, %s, %s,
-                    (SELECT nome FROM agentes WHERE codigo_do_agente=%s))
-                    ON CONFLICT (telefone, phone_id) WHERE ended_at IS NULL DO NOTHING  -- ✅
+                    (%s, %s, %s, %s, (SELECT nome FROM agentes WHERE codigo_do_agente=%s))
+                    ON CONFLICT ON CONSTRAINT ux_conversa_ativa DO NOTHING
                     RETURNING telefone
                 """, (c["remetente"], phone_id, carteira, codigo, codigo))
                 row = cur.fetchone()
@@ -901,35 +932,27 @@ def tickets_minhas():
 
     conn = get_conn(); cur = conn.cursor()
     try:
-        # usa a mesma visão de contatos para devolver preview + filtra pelas conversas alocadas ao agente
         sql = r"""
-        SELECT c.*
-        FROM (
-            /* === bloco idêntico ao SELECT final do /api/conversas/contatos === */
+            /* === visão de contatos (mesma do /api/conversas/contatos) === */
             WITH dados AS (
                 SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
-                    ea.telefone, ea.status, ea.conteudo,
-                    phone_id, string_to_array(ea.conteudo, ',') AS vars,
-                    (envios.template::json ->> 'bodyText') AS body_text
+                       ea.telefone, ea.status, ea.conteudo,
+                       phone_id, string_to_array(ea.conteudo, ',') AS vars,
+                       (envios.template::json ->> 'bodyText') AS body_text
                 FROM envios_analitico ea
                 JOIN envios ON ea.nome_disparo = envios.nome_disparo
-                AND ea.grupo_trabalho = envios.grupo_trabalho
+                            AND ea.grupo_trabalho = envios.grupo_trabalho
             ),
             enviados AS (
                 SELECT d.data_hora, d.telefone, d.phone_id, d.status,
-                    COALESCE(rep.txt, d.body_text) AS mensagem_final
+                       COALESCE(rep.txt, d.body_text) AS mensagem_final
                 FROM dados d
                 LEFT JOIN LATERAL (
                     WITH RECURSIVE rep(i, txt) AS (
                         SELECT 0, d.body_text
                         UNION ALL
                         SELECT i+1,
-                            regexp_replace(
-                                txt,
-                                '\{\{' || (i+1) || '\}\}',
-                                COALESCE(btrim(d.vars[i+1]), ''),
-                                'g'
-                            )
+                               regexp_replace(txt, '\{\{'||(i+1)||'\}\}', COALESCE(btrim(d.vars[i+1]), ''), 'g')
                         FROM rep
                         WHERE i < COALESCE(array_length(d.vars, 1), 0)
                     )
@@ -938,13 +961,13 @@ def tickets_minhas():
             ),
             cliente_msg AS (
                 SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
-                    direcao AS status, mensagem AS mensagem_final, msg_id
+                       direcao AS status, mensagem AS mensagem_final, msg_id
                 FROM mensagens
             ),
             conversas AS (
                 SELECT data_hora,
-                    regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
-                    phone_id, status, mensagem_final, ''::text AS msg_id
+                       regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone,
+                       phone_id, status, mensagem_final, ''::text AS msg_id
                 FROM enviados
                 UNION
                 SELECT data_hora, telefone, phone_id, status, mensagem_final, msg_id
@@ -956,50 +979,47 @@ def tickets_minhas():
             msg_id AS (
                 SELECT remetente, msg_id FROM (
                     SELECT data_hora, remetente, msg_id,
-                        row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS idx
+                           row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS idx
                     FROM mensagens
                 ) t WHERE idx = 1
             ),
             ranked AS (
                 SELECT a.telefone, a.phone_id, a.status, a.mensagem_final, a.data_hora,
-                    b.msg_id,
-                    row_number() OVER (
-                        PARTITION BY a.telefone,a.phone_id
-                        ORDER BY CASE WHEN a.status='in'
-                                        THEN a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
-                                        ELSE a.data_hora END DESC
-                    ) AS rn
+                       b.msg_id,
+                       row_number() OVER (
+                           PARTITION BY a.telefone,a.phone_id
+                           ORDER BY CASE WHEN a.status='in'
+                                         THEN a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                                         ELSE a.data_hora END DESC
+                       ) AS rn
                 FROM conversas a
                 INNER JOIN msg_id b
-                ON a.telefone = b.remetente
-                OR a.telefone = regexp_replace(b.remetente, '(?<=^55\\d{2})9', '', 'g')
+                        ON a.telefone = b.remetente
+                        OR a.telefone = regexp_replace(b.remetente, '(?<=^55\\d{2})9', '', 'g')
             )
             SELECT r.telefone AS remetente,
-                (SELECT COALESCE(nome, r.telefone) FROM mensagens m
-                    WHERE m.remetente = r.telefone
-                    ORDER BY CASE WHEN r.status='in'
-                                THEN m.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
-                                ELSE m.data_hora END DESC
-                    LIMIT 1) AS nome_exibicao,
-                r.phone_id,
-                r.msg_id,
-                r.mensagem_final,
-                (CASE WHEN r.status='in'
-                        THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
-                        ELSE r.data_hora END) AS data_hora,
-                r.status
+                   (SELECT COALESCE(nome, r.telefone)
+                      FROM mensagens m
+                      WHERE m.remetente = r.telefone
+                      ORDER BY CASE WHEN r.status='in'
+                                    THEN m.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                                    ELSE m.data_hora END DESC
+                      LIMIT 1) AS nome_exibicao,
+                   r.phone_id,
+                   r.msg_id,
+                   r.mensagem_final,
+                   (CASE WHEN r.status='in'
+                         THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                         ELSE r.data_hora END) AS data_hora,
+                   r.status
             FROM ranked r
+            JOIN conversas_em_andamento t
+              ON t.telefone = r.telefone AND t.phone_id = r.phone_id
             WHERE r.rn = 1
-            AND (CASE WHEN r.status='in'
-                        THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
-                        ELSE r.data_hora END) >= now() - interval '1 day'
-        ) c
-        JOIN conversas_em_andamento t
-        ON t.telefone = c.remetente AND t.phone_id = c.phone_id
-        WHERE t.codigo_do_agente = %s
-        AND t.ended_at IS NULL
-        AND (%s IS NULL OR t.carteira = %s)
-        ORDER BY c.data_hora DESC;
+              AND t.codigo_do_agente = %s
+              AND t.ended_at IS NULL
+              AND (%s IS NULL OR t.carteira = %s)
+            ORDER BY data_hora DESC;
         """
         cur.execute(sql, (codigo, carteira, carteira))
         rows = cur.fetchall()
@@ -1042,6 +1062,52 @@ def tickets_liberar():
         return jsonify({"ok": False, "erro": f"liberar falhou: {str(e)}"}), 500
     finally:
         cur.close(); conn.close()
+
+@app.route("/api/tickets/concluir", methods=["POST"])
+def tickets_concluir():
+    data = request.get_json(silent=True) or {}
+    try:
+        codigo  = int(data.get("codigo_do_agente"))
+    except:
+        return jsonify({"ok": False, "erro": "codigo_do_agente inválido"}), 400
+
+    telefone = data.get("remetente")
+    phone_id = data.get("phone_id")
+    motivo   = (data.get("motivo") or "").strip()
+
+    if not telefone or not phone_id:
+        return jsonify({"ok": False, "erro": "remetente e phone_id são obrigatórios"}), 400
+
+    if motivo not in ALLOWED_MOTIVOS_CONCLUSAO:
+        return jsonify({"ok": False, "erro": "motivo inválido"}), 400
+
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE conversas_em_andamento
+               SET ended_at = NOW()
+             WHERE codigo_do_agente = %s
+               AND telefone = %s
+               AND phone_id = %s
+               AND ended_at IS NULL
+        """, (codigo, telefone, phone_id))
+
+        cur.execute("""
+        INSERT INTO tickets_bloqueados (telefone, phone_id, bloqueado_at, motivo)
+        VALUES (%s, %s, NOW(), %s)
+        ON CONFLICT (telefone, phone_id)
+        DO UPDATE SET bloqueado_at = EXCLUDED.bloqueado_at, motivo = EXCLUDED.motivo
+        """, (telefone, phone_id, motivo))
+
+
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"ok": False, "erro": f"concluir falhou: {str(e)}"}), 500
+    finally:
+        cur.close(); conn.close()
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 6000))
