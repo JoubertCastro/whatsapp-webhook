@@ -5,7 +5,23 @@ from datetime import datetime
 import boto3
 from botocore.client import Config
 import base64
+import psycopg2.errors
+
+
 app = Flask(__name__)
+
+CARTEIRA_TO_PHONE = {
+    "ConnectZap": "732661079928516",
+    "Recovery PJ": "727586317113885",
+    "Recovery PF": "802977069563598",
+    "Mercado Pago Cobrança": "821562937700669",
+    "DivZero": "779797401888141",
+    "Arc4U": "829210283602406",
+    "Serasa": "713021321904495",
+    "Mercado Pago Vendas": "803535039503723",
+}
+
+
 
 # --- CORS ---
 origins_env = os.getenv("ALLOWED_ORIGINS", "https://joubertcastro.github.io,https://*.github.io,*")
@@ -16,7 +32,7 @@ CORS(
     app,
     resources={r"/api/*": {
         "origins": cors_origins,
-        "methods": ["GET", "POST", "OPTIONS"],
+        "methods": ["GET", "POST", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "expose_headers": ["Content-Type"]
     }},
@@ -41,7 +57,7 @@ def add_cors_headers(resp):
         resp.headers["Access-Control-Allow-Origin"] = origin
         resp.headers["Vary"] = "Origin"
         resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
     return resp
 
 @app.before_request
@@ -89,12 +105,31 @@ def ensure_tables():
                 resposta_raw JSONB
             );
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS conversas_em_andamento (
+              id SERIAL PRIMARY KEY,
+              telefone TEXT NOT NULL,
+              phone_id TEXT NOT NULL,
+              carteira TEXT NOT NULL,
+              codigo_do_agente INT NOT NULL REFERENCES agentes(codigo_do_agente),
+              nome_agente TEXT NOT NULL,
+              started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              ended_at TIMESTAMPTZ NULL,
+              last_heartbeat TIMESTAMPTZ NULL DEFAULT NOW()
+            );
+        """)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_conversa_ativa
+              ON conversas_em_andamento (telefone, phone_id)
+              WHERE ended_at IS NULL;
+        """)
         conn.commit()
     finally:
         cur.close()
         conn.close()
 
 ensure_tables()
+
 
 # -----------------------------
 # CONFIGURAÇÃO S3
@@ -684,6 +719,329 @@ def enviar_mensagem(telefone):
         return jsonify({"ok": False, "erro": resposta_raw, "status_code": r.status_code}), r.status_code
 
     return jsonify({"ok": True, "resposta": resposta_raw, "msg_id": retorno_msg_id or msg_id})
+
+@app.route("/api/tickets/claim", methods=["POST"])
+def tickets_claim():
+    data = request.get_json(silent=True) or {}
+    codigo   = data.get("codigo_do_agente")
+    carteira = data.get("carteira")
+
+    if not isinstance(codigo, int) or not carteira:
+        return jsonify({"ok": False, "erro": "codigo_do_agente (int) e carteira são obrigatórios"}), 400
+
+    phone_id = CARTEIRA_TO_PHONE.get(carteira)
+    if not phone_id:
+        return jsonify({"ok": False, "erro": "carteira desconhecida"}), 400
+
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        # 1) precisa estar online na carteira
+        cur.execute("""
+            SELECT 1 FROM fila_de_atendimento
+            WHERE codigo_do_agente=%s AND carteira=%s
+        """, (codigo, carteira))
+        if not cur.fetchone():
+            return jsonify({"ok": False, "erro": "agente está offline nesta carteira"}), 409
+
+        # 2) “faxina”: libera conversas ativas de agentes que já saíram da fila
+        cur.execute("""
+            UPDATE conversas_em_andamento t
+               SET ended_at = NOW()
+             WHERE ended_at IS NULL
+               AND NOT EXISTS (
+                     SELECT 1 FROM fila_de_atendimento f
+                      WHERE f.codigo_do_agente = t.codigo_do_agente
+                        AND f.carteira = t.carteira
+               )
+        """)
+        conn.commit()
+
+        # 3) lista candidatos desta carteira (mesma lógica do /api/conversas/contatos com filtro)
+        sql = r"""
+            WITH dados AS (
+                SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
+                       ea.telefone, ea.status, ea.conteudo,
+                       phone_id, string_to_array(ea.conteudo, ',') AS vars,
+                       (envios.template::json ->> 'bodyText') AS body_text
+                FROM envios_analitico ea
+                JOIN envios ON ea.nome_disparo = envios.nome_disparo
+                  AND ea.grupo_trabalho = envios.grupo_trabalho
+            ),
+            enviados AS (
+                SELECT d.data_hora, d.telefone, d.phone_id, d.status,
+                       COALESCE(rep.txt, d.body_text) AS mensagem_final
+                FROM dados d
+                LEFT JOIN LATERAL (
+                    WITH RECURSIVE rep(i, txt) AS (
+                        SELECT 0, d.body_text
+                        UNION ALL
+                        SELECT i+1,
+                            regexp_replace(
+                                txt,
+                                '\{\{' || (i+1) || '\}\}',
+                                COALESCE(btrim(d.vars[i+1]), ''),
+                                'g'
+                            )
+                        FROM rep
+                        WHERE i < COALESCE(array_length(d.vars, 1), 0)
+                    )
+                    SELECT txt FROM rep ORDER BY i DESC LIMIT 1
+                ) rep ON TRUE
+            ),
+            cliente_msg AS (
+                SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
+                       direcao AS status, mensagem AS mensagem_final, msg_id
+                FROM mensagens
+            ),
+            conversas AS (
+                SELECT data_hora,
+                       regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone,
+                       phone_id, status, mensagem_final, ''::text AS msg_id
+                FROM enviados
+                UNION
+                SELECT data_hora, telefone, phone_id, status, mensagem_final, msg_id
+                FROM cliente_msg
+                UNION
+                SELECT data_hora, remetente AS telefone, phone_id, status, conteudo AS mensagem_final, ''::text AS msg_id
+                FROM mensagens_avulsas WHERE status <> 'erro'
+            ),
+            msg_id AS (
+                SELECT remetente, msg_id FROM (
+                    SELECT data_hora, remetente, msg_id,
+                           row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS idx
+                    FROM mensagens
+                ) t WHERE idx = 1
+            ),
+            ranked AS (
+                SELECT a.telefone, a.phone_id, a.status, a.mensagem_final, a.data_hora,
+                       b.msg_id,
+                       row_number() OVER (
+                          PARTITION BY a.telefone,a.phone_id
+                          ORDER BY CASE WHEN a.status='in'
+                                        THEN a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                                        ELSE a.data_hora END DESC
+                       ) AS rn
+                FROM conversas a
+                INNER JOIN msg_id b
+                  ON a.telefone = b.remetente
+                  OR a.telefone = regexp_replace(b.remetente, '(?<=^55\\d{2})9', '', 'g')
+            )
+            SELECT r.telefone AS remetente,
+                   (SELECT COALESCE(nome, r.telefone) FROM mensagens m
+                     WHERE m.remetente = r.telefone
+                     ORDER BY CASE WHEN r.status='in'
+                                   THEN m.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                                   ELSE m.data_hora END DESC
+                     LIMIT 1) AS nome_exibicao,
+                   r.phone_id,
+                   r.mensagem_final,
+                   (CASE WHEN r.status='in'
+                         THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                         ELSE r.data_hora END) AS data_hora,
+                   r.status
+            FROM ranked r
+            WHERE r.rn = 1
+              AND r.phone_id = %s
+              AND (CASE WHEN r.status='in'
+                        THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                        ELSE r.data_hora END) >= now() - interval '1 day'
+            ORDER BY (r.status='in') DESC, data_hora DESC
+            LIMIT 50
+        """
+        cur.execute(sql, (phone_id,))
+        candidatos = cur.fetchall()
+
+        # 4) tenta "reservar" um candidato de cada vez
+        for c in candidatos:
+            try:
+                cur.execute("""
+                    INSERT INTO conversas_em_andamento
+                    (telefone, phone_id, carteira, codigo_do_agente, nome_agente)
+                    VALUES
+                    (%s, %s, %s, %s,
+                    (SELECT nome FROM agentes WHERE codigo_do_agente=%s))
+                    ON CONFLICT (telefone, phone_id) WHERE ended_at IS NULL DO NOTHING  -- ✅
+                    RETURNING telefone
+                """, (c["remetente"], phone_id, carteira, codigo, codigo))
+                row = cur.fetchone()
+                if row:
+                    conn.commit()
+                    return jsonify({
+                        "ok": True,
+                        "ticket": {
+                            "remetente": c["remetente"],
+                            "phone_id": phone_id,
+                            "nome_exibicao": c["nome_exibicao"] or c["remetente"],
+                            "mensagem_final": c["mensagem_final"],
+                            "data_hora": c["data_hora"].isoformat() if c["data_hora"] else None
+                        }
+                    })
+                conn.rollback()
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                continue
+
+        return jsonify({"ok": False, "erro": "Sem conversas disponíveis nesta carteira"}), 404
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"ok": False, "erro": f"claim falhou: {str(e)}"}), 500
+    finally:
+        cur.close(); conn.close()
+@app.route("/api/tickets/minhas", methods=["GET"])
+def tickets_minhas():
+    try:
+        codigo = int(request.args.get("agente", "0"))
+    except:
+        codigo = 0
+    carteira = request.args.get("carteira")
+
+    if not codigo:
+        return jsonify({"ok": False, "erro": "parâmetro agente é obrigatório"}), 400
+
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        # usa a mesma visão de contatos para devolver preview + filtra pelas conversas alocadas ao agente
+        sql = r"""
+        SELECT c.*
+        FROM (
+            /* === bloco idêntico ao SELECT final do /api/conversas/contatos === */
+            WITH dados AS (
+                SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
+                    ea.telefone, ea.status, ea.conteudo,
+                    phone_id, string_to_array(ea.conteudo, ',') AS vars,
+                    (envios.template::json ->> 'bodyText') AS body_text
+                FROM envios_analitico ea
+                JOIN envios ON ea.nome_disparo = envios.nome_disparo
+                AND ea.grupo_trabalho = envios.grupo_trabalho
+            ),
+            enviados AS (
+                SELECT d.data_hora, d.telefone, d.phone_id, d.status,
+                    COALESCE(rep.txt, d.body_text) AS mensagem_final
+                FROM dados d
+                LEFT JOIN LATERAL (
+                    WITH RECURSIVE rep(i, txt) AS (
+                        SELECT 0, d.body_text
+                        UNION ALL
+                        SELECT i+1,
+                            regexp_replace(
+                                txt,
+                                '\{\{' || (i+1) || '\}\}',
+                                COALESCE(btrim(d.vars[i+1]), ''),
+                                'g'
+                            )
+                        FROM rep
+                        WHERE i < COALESCE(array_length(d.vars, 1), 0)
+                    )
+                    SELECT txt FROM rep ORDER BY i DESC LIMIT 1
+                ) rep ON TRUE
+            ),
+            cliente_msg AS (
+                SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
+                    direcao AS status, mensagem AS mensagem_final, msg_id
+                FROM mensagens
+            ),
+            conversas AS (
+                SELECT data_hora,
+                    regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
+                    phone_id, status, mensagem_final, ''::text AS msg_id
+                FROM enviados
+                UNION
+                SELECT data_hora, telefone, phone_id, status, mensagem_final, msg_id
+                FROM cliente_msg
+                UNION
+                SELECT data_hora, remetente AS telefone, phone_id, status, conteudo AS mensagem_final, ''::text AS msg_id
+                FROM mensagens_avulsas WHERE status <> 'erro'
+            ),
+            msg_id AS (
+                SELECT remetente, msg_id FROM (
+                    SELECT data_hora, remetente, msg_id,
+                        row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS idx
+                    FROM mensagens
+                ) t WHERE idx = 1
+            ),
+            ranked AS (
+                SELECT a.telefone, a.phone_id, a.status, a.mensagem_final, a.data_hora,
+                    b.msg_id,
+                    row_number() OVER (
+                        PARTITION BY a.telefone,a.phone_id
+                        ORDER BY CASE WHEN a.status='in'
+                                        THEN a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                                        ELSE a.data_hora END DESC
+                    ) AS rn
+                FROM conversas a
+                INNER JOIN msg_id b
+                ON a.telefone = b.remetente
+                OR a.telefone = regexp_replace(b.remetente, '(?<=^55\\d{2})9', '', 'g')
+            )
+            SELECT r.telefone AS remetente,
+                (SELECT COALESCE(nome, r.telefone) FROM mensagens m
+                    WHERE m.remetente = r.telefone
+                    ORDER BY CASE WHEN r.status='in'
+                                THEN m.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                                ELSE m.data_hora END DESC
+                    LIMIT 1) AS nome_exibicao,
+                r.phone_id,
+                r.msg_id,
+                r.mensagem_final,
+                (CASE WHEN r.status='in'
+                        THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                        ELSE r.data_hora END) AS data_hora,
+                r.status
+            FROM ranked r
+            WHERE r.rn = 1
+            AND (CASE WHEN r.status='in'
+                        THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                        ELSE r.data_hora END) >= now() - interval '1 day'
+        ) c
+        JOIN conversas_em_andamento t
+        ON t.telefone = c.remetente AND t.phone_id = c.phone_id
+        WHERE t.codigo_do_agente = %s
+        AND t.ended_at IS NULL
+        AND (%s IS NULL OR t.carteira = %s)
+        ORDER BY c.data_hora DESC;
+        """
+        cur.execute(sql, (codigo, carteira, carteira))
+        rows = cur.fetchall()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"ok": False, "erro": f"minhas falhou: {str(e)}"}), 500
+    finally:
+        cur.close(); conn.close()
+
+@app.route("/api/tickets/liberar", methods=["DELETE"])
+def tickets_liberar():
+    data = request.get_json(silent=True) or {}
+    try:
+        codigo  = int(data.get("codigo_do_agente"))
+    except:
+        return jsonify({"ok": False, "erro": "codigo_do_agente inválido"}), 400
+    telefone = data.get("remetente")
+    phone_id = data.get("phone_id")
+
+    if not telefone or not phone_id:
+        return jsonify({"ok": False, "erro": "remetente e phone_id são obrigatórios"}), 400
+
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE conversas_em_andamento
+               SET ended_at = NOW()
+             WHERE codigo_do_agente = %s
+               AND telefone = %s
+               AND phone_id = %s
+               AND ended_at IS NULL
+             RETURNING id
+        """, (codigo, telefone, phone_id))
+        row = cur.fetchone(); conn.commit()
+        if not row:
+            return jsonify({"ok": False, "erro": "ticket não encontrado ou já liberado"}), 404
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"ok": False, "erro": f"liberar falhou: {str(e)}"}), 500
+    finally:
+        cur.close(); conn.close()
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 6000))
