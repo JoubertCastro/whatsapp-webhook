@@ -2,9 +2,11 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime, timezone, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
-import psycopg2, psycopg2.extras
-import json, os
-from zoneinfo import ZoneInfo
+import psycopg2
+import psycopg2.extras
+import json
+import os
+
 
 # =========================
 # Config
