@@ -16,7 +16,7 @@ CORS(app)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/postgres"
+    "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
 )
 VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "meu_token_secreto")
 
