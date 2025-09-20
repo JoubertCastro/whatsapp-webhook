@@ -64,10 +64,10 @@ def resumo():
 
         sql = f"""
             SELECT 
-              COUNT(distinct left (msg_id,33)) total,
-              COUNT(distinct left (msg_id,33)) FILTER (WHERE status = 'sent') enviados,
-              COUNT(distinct left (msg_id,33)) FILTER (WHERE status = 'delivered') entregues,
-              COUNT(distinct left (msg_id,33)) FILTER (WHERE status = 'read') lidos
+              COUNT(distinct left (msg_id,39)) total,
+              COUNT(distinct left (msg_id,39)) FILTER (WHERE status = 'sent') enviados,
+              COUNT(distinct left (msg_id,39)) FILTER (WHERE status = 'delivered') entregues,
+              COUNT(distinct left (msg_id,39)) FILTER (WHERE status = 'read') lidos
             FROM status_mensagens
             {"WHERE " + " AND ".join(where) if where else ""}
         """
@@ -311,8 +311,13 @@ def atend_series():
         sql_msg = f"""
             SELECT m.data_hora::date AS dia,
                    SUM(CASE WHEN m.direcao='in'  THEN 1 ELSE 0 END) AS inbound,
-                   SUM(CASE WHEN m.direcao='out' THEN 1 ELSE 0 END) AS outbound
-            FROM mensagens m
+                   SUM(CASE WHEN m.direcao='enviado' THEN 1 ELSE 0 END) AS outbound
+            FROM (
+                select data_hora,phone_number_id, direcao
+                from mensagens
+                union all
+                select data_hora,phone_id as phone_number_id ,status as direcao
+                from mensagens_avulsas ) mensagens m
             WHERE 1=1 {"AND " + " AND ".join(conds_m) if conds_m else ""}
             {and_ag_m}
             GROUP BY m.data_hora::date
