@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 import psycopg2, psycopg2.extras, os
+from typing import Tuple, List, Any
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 CORS(app)  # habilita CORS depois de criar o app
@@ -12,6 +13,29 @@ DATABASE_URL = os.getenv(
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+
+def parse_filters_for_sessions(args) -> Tuple[List[str], List[Any]]:
+    conds, params = [], []
+    start = args.get("start")
+    end   = args.get("end")
+    phone_id = args.get("phone_id")
+    agentes_raw = args.get("agentes")  # ex: "12,45,87"
+    agentes = [int(x) for x in agentes_raw.split(",") if x.strip().isdigit()] if agentes_raw else []
+
+    if start:
+        conds.append("t.started_at::date >= %s")
+        params.append(start)
+    if end:
+        conds.append("t.started_at::date <= %s")
+        params.append(end)
+    if phone_id:
+        conds.append("t.phone_id = %s")
+        params.append(phone_id)
+    if agentes:
+        conds.append("t.codigo_do_agente = ANY(%s)")
+        params.append(agentes)
+
+    return conds, params
 
 # ---------- Endpoints API ----------
 @app.route("/api/dashboard/resumo")
@@ -40,10 +64,10 @@ def resumo():
 
         sql = f"""
             SELECT 
-              COUNT(*) total,
-              COUNT(*) FILTER (WHERE status = 'sent') enviados,
-              COUNT(*) FILTER (WHERE status = 'delivered') entregues,
-              COUNT(*) FILTER (WHERE status = 'read') lidos
+              COUNT(distinct left (msg_id,33)) total,
+              COUNT(distinct left (msg_id,33)) FILTER (WHERE status = 'sent') enviados,
+              COUNT(distinct left (msg_id,33)) FILTER (WHERE status = 'delivered') entregues,
+              COUNT(distinct left (msg_id,33)) FILTER (WHERE status = 'read') lidos
             FROM status_mensagens
             {"WHERE " + " AND ".join(where) if where else ""}
         """
@@ -96,111 +120,160 @@ def envios():
 # --- NOVO: resumo de atendimentos ---
 @app.route("/api/atendimentos/resumo")
 def atend_resumo():
-    start = request.args.get("start")
-    end = request.args.get("end")
-    phone_id = request.args.get("phone_id")
-
-    where_t = []
-    where_b = []
-    where_m = []
-
-    params_t = []
-    params_b = []
-    params_m = []
-
-    # conversas_em_andamento.started_at / ended_at
-    if start:
-        where_t.append("started_at::date >= %s"); params_t.append(start)
-        where_b.append("bloqueado_at::date >= %s"); params_b.append(start)
-        where_m.append("data_hora::date >= %s"); params_m.append(start)
-    if end:
-        where_t.append("started_at::date <= %s"); params_t.append(end)
-        where_b.append("bloqueado_at::date <= %s"); params_b.append(end)
-        where_m.append("data_hora::date <= %s"); params_m.append(end)
-    if phone_id:
-        where_t.append("phone_id = %s"); params_t.append(phone_id)
-        where_b.append("phone_id = %s"); params_b.append(phone_id)
-        where_m.append("phone_number_id = %s"); params_m.append(phone_id)
-
     conn = get_conn(); cur = conn.cursor()
     try:
-        # em atendimento = started no período e ainda sem ended
-        cur.execute(f"""
-            SELECT COUNT(*) em_atendimento
-            FROM conversas_em_andamento
-            {"WHERE " + " AND ".join(where_t) if where_t else ""}
-            AND ended_at IS NULL
-        """, tuple(params_t))
-        em_at = cur.fetchone()["em_atendimento"]
+        # ---------- EM ATENDIMENTO ----------
+        conds, params = parse_filters_for_sessions(request.args)
+        conds_em = conds[:] + ["t.ended_at IS NULL"]
+        sql_em = "SELECT COUNT(*) AS em_atendimento FROM conversas_em_andamento t"
+        if conds_em:
+            sql_em += " WHERE " + " AND ".join(conds_em)
+        cur.execute(sql_em, tuple(params))
+        em_atendimento = cur.fetchone()["em_atendimento"]
 
-        # concluídos (bloqueados) no período
-        cur.execute(f"""
-            SELECT COUNT(*) concluidos
-            FROM tickets_bloqueados
-            {"WHERE " + " AND ".join(where_b) if where_b else ""}
-        """, tuple(params_b))
-        concl = cur.fetchone()["concluidos"]
+        # ---------- CONCLUÍDOS ----------
+        # filtra por período/phone_id e, se houver filtro de agente, casa o último agente da sessão
+        start = request.args.get("start"); end = request.args.get("end"); phone_id = request.args.get("phone_id")
+        agentes_raw = request.args.get("agentes")
+        agentes = [int(x) for x in agentes_raw.split(",") if x.strip().isdigit()] if agentes_raw else []
+        conds_b, params_b = [], []
+        if start: conds_b.append("b.bloqueado_at::date >= %s"); params_b.append(start)
+        if end:   conds_b.append("b.bloqueado_at::date <= %s"); params_b.append(end)
+        if phone_id: conds_b.append("b.phone_id = %s"); params_b.append(phone_id)
 
-        # tempo médio 1ª resposta (da 1ª 'in' pra 1ª 'out' subsequente no mesmo telefone/phone_id, no período)
-        cur.execute(f"""
-            WITH ins AS (
-              SELECT telefone, phone_number_id AS phone_id, MIN(data_hora) AS first_in
-              FROM mensagens
-              WHERE direcao='in'
-              {"AND " + " AND ".join(where_m) if where_m else ""}
-              GROUP BY 1,2
-            ), outs AS (
-              SELECT m.telefone, m.phone_number_id AS phone_id, MIN(m.data_hora) AS first_out
+        sql_conc = """
+            WITH last_agent AS (
+              SELECT b.telefone, b.phone_id, b.bloqueado_at,
+                     (SELECT t.codigo_do_agente
+                        FROM conversas_em_andamento t
+                       WHERE t.telefone=b.telefone AND t.phone_id=b.phone_id AND t.ended_at IS NOT NULL
+                       ORDER BY t.ended_at DESC
+                       LIMIT 1) AS codigo_do_agente
+              FROM tickets_bloqueados b
+              {where_b}
+            )
+            SELECT COUNT(*) AS concluidos
+            FROM last_agent
+            {and_ag}
+        """.format(
+            where_b=("WHERE " + " AND ".join(conds_b)) if conds_b else "",
+            and_ag=("WHERE codigo_do_agente = ANY(%s)") if agentes else ""
+        )
+        params_conc = params_b + ([agentes] if agentes else [])
+        cur.execute(sql_conc, tuple(params_conc))
+        concluidos = cur.fetchone()["concluidos"]
+
+        # ---------- TMA (média em segundos) ----------
+        conds_tma, params_tma = parse_filters_for_sessions(request.args)
+        conds_tma += ["t.ended_at IS NOT NULL"]
+        sql_tma = """
+            SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (t.ended_at - t.started_at))), 0)::BIGINT AS tma_segundos
+            FROM conversas_em_andamento t
+            {where_tma}
+        """.format(where_tma=("WHERE " + " AND ".join(conds_tma)) if conds_tma else "")
+        cur.execute(sql_tma, tuple(params_tma))
+        tma = cur.fetchone()["tma_segundos"]
+
+        # ---------- TMR (1ª resposta em segundos) ----------
+        # calcula por (telefone,phone_id): primeiro 'in' no período e primeiro 'out' após ele
+        conds_msg, params_msg = [], []
+        if start: conds_msg.append("m.data_hora::date >= %s"); params_msg.append(start)
+        if end:   conds_msg.append("m.data_hora::date <= %s"); params_msg.append(end)
+        if phone_id: conds_msg.append("m.phone_number_id = %s"); params_msg.append(phone_id)
+
+        # limitar por agentes (quando houver) usando o "último agente" do par nesse período
+        and_ag_filter = ""
+        if agentes:
+            and_ag_filter = """
+              AND (
+                SELECT t.codigo_do_agente
+                FROM conversas_em_andamento t
+                WHERE (t.telefone = m.remetente OR t.telefone = regexp_replace(m.remetente, '(?<=^55\\d{2})9', '', 'g'))
+                  AND t.phone_id = m.phone_number_id
+                ORDER BY t.ended_at DESC NULLS LAST, t.started_at DESC
+                LIMIT 1
+              ) = ANY(%s)
+            """
+            params_msg.append(agentes)
+
+        sql_tmr = f"""
+            WITH first_in AS (
+              SELECT
+                regexp_replace(m.remetente, '(?<=^55\\d{{2}})9', '', 'g') AS telefone,
+                m.phone_number_id AS phone_id,
+                MIN(m.data_hora) AS first_in
               FROM mensagens m
-              JOIN ins i ON i.telefone = m.telefone AND i.phone_id = m.phone_number_id
-              WHERE m.direcao='out' AND m.data_hora >= i.first_in
+              WHERE m.direcao='in' {"AND " + " AND ".join(conds_msg) if conds_msg else ""}
+              {and_ag_filter}
+              GROUP BY 1,2
+            ),
+            first_out AS (
+              SELECT f.telefone, f.phone_id, MIN(m2.data_hora) AS first_out
+              FROM first_in f
+              JOIN mensagens m2
+                ON (m2.remetente = f.telefone OR m2.remetente = '9'||substring(f.telefone from 1 for 2)||substring(f.telefone from 3))
+               AND m2.phone_number_id = f.phone_id
+               AND m2.direcao='out'
+               AND m2.data_hora >= f.first_in
               GROUP BY 1,2
             )
-            SELECT AVG(first_out - first_in) AS tmr
-            FROM ins JOIN outs USING (telefone, phone_id)
-        """, tuple(params_m))
-        tmr = cur.fetchone()["tmr"]  # pode ser None
-
-        # TMA: média (ended_at - started_at) para conversas finalizadas no período
-        cur.execute(f"""
-            SELECT AVG(ended_at - started_at) AS tma
-            FROM conversas_em_andamento
-            {"WHERE " + " AND ".join(where_t) if where_t else ""}
-            AND ended_at IS NOT NULL
-        """, tuple(params_t))
-        tma = cur.fetchone()["tma"]
+            SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (o.first_out - i.first_in))), 0)::BIGINT AS tmr_segundos
+            FROM first_in i
+            LEFT JOIN first_out o
+              ON o.telefone=i.telefone AND o.phone_id=i.phone_id
+            WHERE o.first_out IS NOT NULL
+        """
+        cur.execute(sql_tmr, tuple(params_msg))
+        tmr = cur.fetchone()["tmr_segundos"]
 
         return jsonify({
-            "em_atendimento": em_at or 0,
-            "concluidos": concl or 0,
-            "tma_segundos": int(tma.total_seconds()) if tma else None,
-            "tmr_segundos": int(tmr.total_seconds()) if tmr else None
+            "em_atendimento": em_atendimento,
+            "concluidos": concluidos,
+            "tma_segundos": int(tma or 0),
+            "tmr_segundos": int(tmr or 0),
         })
     finally:
         cur.close(); conn.close()
 
-
 # --- NOVO: motivos de conclusão (pizza) ---
 @app.route("/api/atendimentos/motivos")
 def atend_motivos():
-    start = request.args.get("start")
-    end = request.args.get("end")
-    phone_id = request.args.get("phone_id")
-
-    where = []; params = []
-    if start: where.append("bloqueado_at::date >= %s"); params.append(start)
-    if end: where.append("bloqueado_at::date <= %s"); params.append(end)
-    if phone_id: where.append("phone_id = %s"); params.append(phone_id)
-
     conn = get_conn(); cur = conn.cursor()
     try:
-        cur.execute(f"""
-            SELECT motivo, COUNT(*) qtd
-            FROM tickets_bloqueados
-            {"WHERE " + " AND ".join(where) if where else ""}
+        start = request.args.get("start"); end = request.args.get("end"); phone_id = request.args.get("phone_id")
+        agentes_raw = request.args.get("agentes")
+        agentes = [int(x) for x in agentes_raw.split(",") if x.strip().isdigit()] if agentes_raw else []
+
+        conds, params = [], []
+        if start: conds.append("b.bloqueado_at::date >= %s"); params.append(start)
+        if end:   conds.append("b.bloqueado_at::date <= %s"); params.append(end)
+        if phone_id: conds.append("b.phone_id = %s"); params.append(phone_id)
+
+        and_ag = ""
+        if agentes:
+            and_ag = "WHERE la.codigo_do_agente = ANY(%s)"
+            params.append(agentes)
+
+        sql = f"""
+            WITH base AS (
+              SELECT b.telefone, b.phone_id, b.motivo, b.bloqueado_at
+              FROM tickets_bloqueados b
+              {("WHERE " + " AND ".join(conds)) if conds else ""}
+            ),
+            la AS (
+              SELECT x.telefone, x.phone_id, x.motivo,
+                     (SELECT t.codigo_do_agente FROM conversas_em_andamento t
+                       WHERE t.telefone=x.telefone AND t.phone_id=x.phone_id AND t.ended_at IS NOT NULL
+                       ORDER BY t.ended_at DESC LIMIT 1) AS codigo_do_agente
+              FROM base x
+            )
+            SELECT motivo, COUNT(*) AS qtd
+            FROM la
+            {and_ag}
             GROUP BY motivo
-            ORDER BY qtd DESC
-        """, tuple(params))
+            ORDER BY qtd DESC, motivo ASC
+        """
+        cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
         cur.close(); conn.close()
@@ -209,48 +282,110 @@ def atend_motivos():
 # --- NOVO: séries diárias de in/out/concluídos ---
 @app.route("/api/atendimentos/series")
 def atend_series():
-    start = request.args.get("start")
-    end = request.args.get("end")
-    phone_id = request.args.get("phone_id")
-
     conn = get_conn(); cur = conn.cursor()
     try:
-        # mensagens por dia
-        where_m = []; params_m = []
-        if start: where_m.append("data_hora::date >= %s"); params_m.append(start)
-        if end: where_m.append("data_hora::date <= %s"); params_m.append(end)
-        if phone_id: where_m.append("phone_number_id = %s"); params_m.append(phone_id)
+        start = request.args.get("start"); end = request.args.get("end"); phone_id = request.args.get("phone_id")
+        agentes_raw = request.args.get("agentes")
+        agentes = [int(x) for x in agentes_raw.split(",") if x.strip().isdigit()] if agentes_raw else []
 
-        cur.execute(f"""
-            SELECT data_hora::date AS dia,
-                   SUM(CASE WHEN direcao='in' THEN 1 ELSE 0 END) AS inbound,
-                   SUM(CASE WHEN direcao='out' THEN 1 ELSE 0 END) AS outbound
-            FROM mensagens
-            {"WHERE " + " AND ".join(where_m) if where_m else ""}
-            GROUP BY 1
-            ORDER BY 1
-        """, tuple(params_m))
-        msgs = cur.fetchall()
+        # mensagens in/out
+        conds_m, params_m = [], []
+        if start: conds_m.append("m.data_hora::date >= %s"); params_m.append(start)
+        if end:   conds_m.append("m.data_hora::date <= %s"); params_m.append(end)
+        if phone_id: conds_m.append("m.phone_number_id = %s"); params_m.append(phone_id)
 
-        # concluídos por dia (bloqueado_at)
-        where_b = []; params_b = []
-        if start: where_b.append("bloqueado_at::date >= %s"); params_b.append(start)
-        if end: where_b.append("bloqueado_at::date <= %s"); params_b.append(end)
-        if phone_id: where_b.append("phone_id = %s"); params_b.append(phone_id)
+        and_ag_m = ""
+        if agentes:
+            and_ag_m = """
+              AND (
+                SELECT t.codigo_do_agente
+                FROM conversas_em_andamento t
+                WHERE (t.telefone = m.remetente OR t.telefone = regexp_replace(m.remetente, '(?<=^55\\d{2})9', '', 'g'))
+                  AND t.phone_id = m.phone_number_id
+                ORDER BY t.ended_at DESC NULLS LAST, t.started_at DESC
+                LIMIT 1
+              ) = ANY(%s)
+            """
+            params_m.append(agentes)
 
-        cur.execute(f"""
-            SELECT bloqueado_at::date AS dia, COUNT(*) concluidos
-            FROM tickets_bloqueados
-            {"WHERE " + " AND ".join(where_b) if where_b else ""}
-            GROUP BY 1
-            ORDER BY 1
-        """, tuple(params_b))
-        concl = cur.fetchall()
+        sql_msg = f"""
+            SELECT m.data_hora::date AS dia,
+                   SUM(CASE WHEN m.direcao='in'  THEN 1 ELSE 0 END) AS inbound,
+                   SUM(CASE WHEN m.direcao='out' THEN 1 ELSE 0 END) AS outbound
+            FROM mensagens m
+            WHERE 1=1 {"AND " + " AND ".join(conds_m) if conds_m else ""}
+            {and_ag_m}
+            GROUP BY m.data_hora::date
+            ORDER BY dia
+        """
+        cur.execute(sql_msg, tuple(params_m))
+        series_msg = cur.fetchall()
 
-        return jsonify({"mensagens": msgs, "concluidos": concl})
+        # concluidos/dia
+        conds_b, params_b = [], []
+        if start: conds_b.append("b.bloqueado_at::date >= %s"); params_b.append(start)
+        if end:   conds_b.append("b.bloqueado_at::date <= %s"); params_b.append(end)
+        if phone_id: conds_b.append("b.phone_id = %s"); params_b.append(phone_id)
+        and_ag_b = ""
+        if agentes:
+            and_ag_b = "WHERE la.codigo_do_agente = ANY(%s)"
+            params_b.append(agentes)
+
+        sql_conc = f"""
+            WITH base AS (
+              SELECT b.telefone, b.phone_id, b.bloqueado_at::date AS dia
+              FROM tickets_bloqueados b
+              {("WHERE " + " AND ".join(conds_b)) if conds_b else ""}
+            ),
+            la AS (
+              SELECT x.telefone, x.phone_id, x.dia,
+                     (SELECT t.codigo_do_agente FROM conversas_em_andamento t
+                       WHERE t.telefone=x.telefone AND t.phone_id=x.phone_id AND t.ended_at IS NOT NULL
+                       ORDER BY t.ended_at DESC LIMIT 1) AS codigo_do_agente
+              FROM base x
+            )
+            SELECT dia, COUNT(*) AS concluidos
+            FROM la
+            {and_ag_b}
+            GROUP BY dia
+            ORDER BY dia
+        """
+        cur.execute(sql_conc, tuple(params_b))
+        series_conc = cur.fetchall()
+
+        return jsonify({"mensagens": series_msg, "concluidos": series_conc})
     finally:
         cur.close(); conn.close()
 
+@app.route("/api/agentes")
+def listar_agentes():
+    phone_id = request.args.get("phone_id")
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        if phone_id:
+            cur.execute("""
+              SELECT codigo_do_agente, nome, carteira
+              FROM agentes
+              WHERE carteira IN (
+                SELECT nome FROM (VALUES
+                  ('ConnectZap','732661079928516'),
+                  ('Recovery PJ','727586317113885'),
+                  ('Recovery PF','802977069563598'),
+                  ('Mercado Pago Cobrança','821562937700669'),
+                  ('DivZero','779797401888141'),
+                  ('Arc4U','829210283602406'),
+                  ('Serasa','713021321904495'),
+                  ('Mercado Pago Vendas','803535039503723')
+                ) AS m(nome,k)
+                WHERE k = %s
+              )
+              ORDER BY nome NULLS LAST, codigo_do_agente
+            """, (phone_id,))
+        else:
+            cur.execute("SELECT codigo_do_agente, nome, carteira FROM agentes ORDER BY nome NULLS LAST, codigo_do_agente")
+        return jsonify(cur.fetchall())
+    finally:
+        cur.close(); conn.close()
 
 # ---------- Página do Dashboard ----------
 @app.route("/dashboard")
