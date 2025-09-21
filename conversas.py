@@ -134,7 +134,7 @@ def ensure_tables():
         CREATE TABLE IF NOT EXISTS tickets_bloqueados (
             telefone      TEXT NOT NULL,
             phone_id      TEXT NOT NULL,
-            bloqueado_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            bloqueado_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'America/Sao_Paulo');
             motivo        TEXT NOT NULL,
             PRIMARY KEY (telefone, phone_id)
         );
