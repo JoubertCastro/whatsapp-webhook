@@ -876,7 +876,7 @@ def tickets_claim():
               AND (CASE WHEN r.status='in'
                         THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
                         ELSE r.data_hora END) >= now() - interval '1 day'
-              AND (tb.telefone IS NULL OR (li.last_in IS NOT NULL AND li.last_in > tb.bloqueado_at))
+              AND (tb.telefone IS NULL OR (li.last_in IS NOT NULL AND li.last_in > tb.bloqueado_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'))
             ORDER BY (r.status='in') DESC, data_hora DESC
         """
         cur.execute(sql, (phone_id,))
