@@ -847,9 +847,9 @@ def tickets_claim():
                 SELECT
                   regexp_replace(remetente, '(?<=^55\\d{2})9', '', 'g') AS telefone,
                   phone_number_id AS phone_id,
-                  MAX(CASE WHEN direcao='in'
+                  MAX(CASE WHEN direcao<>'in'
                            THEN data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
-                           ELSE NULL END) AS last_in
+                           ELSE data_hora END) AS last_in
                 FROM mensagens
                 GROUP BY 1,2
             )
