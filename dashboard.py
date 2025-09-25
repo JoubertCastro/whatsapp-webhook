@@ -317,7 +317,7 @@ def atend_series():
                 from mensagens
                 union all
                 select data_hora,phone_id as phone_number_id ,status as direcao
-                from mensagens_avulsas ) mensagens m
+                from mensagens_avulsas ) m
             WHERE 1=1 {"AND " + " AND ".join(conds_m) if conds_m else ""}
             {and_ag_m}
             GROUP BY m.data_hora::date
