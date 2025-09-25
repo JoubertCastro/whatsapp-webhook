@@ -639,6 +639,156 @@ def get_emoji_by_msgid(msg_id):
         cur.close()
         conn.close()
 
+# --------------------------------------------------
+# 📄 ROTA: obter documento (PDF/DOC/etc) a partir do msg_id
+# --------------------------------------------------
+@app.route("/api/conversas/document/<msg_id>", methods=["GET"])
+def get_document_by_msgid(msg_id):
+    """
+    Retorna o documento como data URI (base64), junto com metadados.
+    Use /download para stream quando o arquivo for grande.
+    """
+    if not msg_id:
+        return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # 1) Busca no payload cru da mensagem o ID do documento + nome de arquivo
+        cur.execute(
+            """
+            SELECT
+              raw->'document'->>'id'        AS doc_id,
+              COALESCE(
+                raw->'document'->>'filename',
+                raw->'document'->>'file_name',
+                'arquivo'
+              ) AS filename
+            FROM mensagens
+            WHERE msg_id = %s
+            LIMIT 1
+            """,
+            (msg_id,)
+        )
+        row = cur.fetchone()
+        if not row or not row.get("doc_id"):
+            return jsonify({"ok": False, "erro": "document id não encontrado"}), 404
+
+        doc_id   = row["doc_id"]
+        filename = row.get("filename") or "arquivo"
+
+        # 2) Consulta o Graph pra pegar a URL lookaside e o mime_type
+        token     = DEFAULT_TOKEN
+        graph_url = f"https://graph.facebook.com/v23.0/{doc_id}"
+        meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
+        meta_resp.raise_for_status()
+        data      = meta_resp.json()
+
+        lookaside_url = data.get("url")
+        mime_type     = data.get("mime_type", "application/octet-stream")
+        file_size     = data.get("file_size")  # pode vir None
+
+        if not lookaside_url:
+            return jsonify({"ok": False, "erro": "URL do documento não encontrada no Graph"}), 500
+
+        # 3) Baixa o binário usando Authorization (o lookaside exige Bearer)
+        bin_resp = requests.get(
+            lookaside_url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30
+        )
+        bin_resp.raise_for_status()
+        content = bin_resp.content
+
+        # 4) Converte para base64 (data URI)
+        b64_data = base64.b64encode(content).decode("utf-8")
+        data_uri = f"data:{mime_type};base64,{b64_data}"
+
+        return jsonify({
+            "ok": True,
+            "data_uri": data_uri,
+            "filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": len(content) if content else file_size
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+# --------------------------------------------------
+# 📄 ROTA: download/stream do documento por msg_id
+# --------------------------------------------------
+@app.route("/api/conversas/document/<msg_id>/download", methods=["GET"])
+def download_document_by_msgid(msg_id):
+    """
+    Faz stream do arquivo com Content-Type e Content-Disposition.
+    Útil para PDFs/arquivos grandes (evita payloads enormes em JSON).
+    """
+    if not msg_id:
+        return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+              raw->'document'->>'id'        AS doc_id,
+              COALESCE(
+                raw->'document'->>'filename',
+                raw->'document'->>'file_name',
+                'arquivo'
+              ) AS filename
+            FROM mensagens
+            WHERE msg_id = %s
+            LIMIT 1
+            """,
+            (msg_id,)
+        )
+        row = cur.fetchone()
+        if not row or not row.get("doc_id"):
+            return jsonify({"ok": False, "erro": "document id não encontrado"}), 404
+
+        doc_id   = row["doc_id"]
+        filename = row.get("filename") or "arquivo"
+
+        token     = DEFAULT_TOKEN
+        graph_url = f"https://graph.facebook.com/v23.0/{doc_id}"
+        meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
+        meta_resp.raise_for_status()
+        data      = meta_resp.json()
+
+        lookaside_url = data.get("url")
+        mime_type     = data.get("mime_type", "application/octet-stream")
+        if not lookaside_url:
+            return jsonify({"ok": False, "erro": "URL do documento não encontrada no Graph"}), 500
+
+        bin_resp = requests.get(
+            lookaside_url,
+            headers={"Authorization": f"Bearer {token}"},
+            stream=True,
+            timeout=30
+        )
+        bin_resp.raise_for_status()
+
+        # Stream para o cliente
+        return Response(
+            bin_resp.iter_content(chunk_size=8192),
+            content_type=mime_type,
+            headers={
+                "Content-Disposition": f'inline; filename="{filename}"',
+                "Cache-Control": "no-store"
+            }
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
 
 # --------------------------------------------------
 # ✉️ Envia mensagem avulsa (texto ou PDF)
