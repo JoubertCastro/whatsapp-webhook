@@ -210,10 +210,10 @@ def atend_resumo():
             first_out AS (
               SELECT f.telefone, f.phone_id, MIN(m2.data_hora) AS first_out
               FROM first_in f
-              JOIN mensagens m2
+              JOIN mensagens_avulsas m2
                 ON (m2.remetente = f.telefone OR m2.remetente = '9'||substring(f.telefone from 1 for 2)||substring(f.telefone from 3))
-               AND m2.phone_number_id = f.phone_id
-               AND m2.direcao='out'
+               AND m2.phone_id = f.phone_id
+               AND m2.status='enviado'
                AND m2.data_hora >= f.first_in
               GROUP BY 1,2
             )
