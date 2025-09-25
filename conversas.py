@@ -608,6 +608,79 @@ def get_audio_by_msgid(msg_id):
     finally:
         cur.close()
         conn.close()
+
+# --------------------------------------------------
+# ⚙️ ROTA: carregar metadados de mensagens "system" por msg_id
+# --------------------------------------------------
+@app.route("/api/conversas/system/<msg_id>", methods=["GET"])
+def get_system_by_msgid(msg_id):
+    """
+    Retorna metadados de mensagens do tipo 'system' (ex.: user_changed_number).
+    Estrutura de retorno:
+      {
+        ok: True,
+        type: "user_changed_number",
+        body: "User A changed from 553898245103 to 553898664673",
+        wa_id: "553898664673",          # novo número (quando aplicável)
+        old_wa_id: "553898245103",      # número antigo (quando aplicável)
+        from: "553898245103",           # alias de old_wa_id (compat)
+        phone_id: "...",
+        data_hora: "2025-02-12T13:37:00-03:00"
+      }
+    """
+    if not msg_id:
+        return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+              remetente,
+              phone_number_id AS phone_id,
+              data_hora,
+              raw->'system'->>'type'   AS system_type,
+              raw->'system'->>'body'   AS body,
+              raw->'system'->>'wa_id'  AS new_wa_id
+            FROM mensagens
+            WHERE msg_id = %s
+            LIMIT 1
+            """,
+            (msg_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"ok": False, "erro": "msg_id não encontrado"}), 404
+
+        # Garante que é de fato uma mensagem 'system'
+        if not (row.get("system_type") or row.get("body") or row.get("new_wa_id")):
+            # Opcional: verifica o tipo bruto da mensagem
+            cur.execute("SELECT raw->>'type' AS msg_type FROM mensagens WHERE msg_id = %s", (msg_id,))
+            trow = cur.fetchone()
+            if not trow or (trow.get("msg_type") or "").lower() != "system":
+                return jsonify({"ok": False, "erro": "mensagem não é do tipo 'system'"}), 404
+
+        old_wa_id = row.get("remetente")
+        resp = {
+            "ok": True,
+            "type": row.get("system_type") or "system",
+            "body": row.get("body"),
+            "wa_id": row.get("new_wa_id"),
+            "old_wa_id": old_wa_id,
+            "from": old_wa_id,  # alias para compatibilidade
+            "phone_id": row.get("phone_id"),
+            "data_hora": row["data_hora"].isoformat() if row.get("data_hora") else None,
+        }
+
+        return jsonify(resp)
+
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
 # --------------------------------------------------
 #  🙏 ROTA: carregar o emoji a partir do msg_id
 # --------------------------------------------------
