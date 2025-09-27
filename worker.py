@@ -28,7 +28,7 @@ def fetch_pendentes():
         SELECT *
         FROM envios e
         WHERE 
-            (modo_envio = 'imediato' OR (modo_envio = 'agendar' AND data_hora_agendamento <= NOW()))
+            (modo_envio = 'imediato' OR (modo_envio = 'agendar' AND data_hora_agendamento <= NOW() AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' ))
             AND EXISTS (
                 SELECT 1 FROM envios_analitico ea
                 WHERE ea.envio_id = e.id AND ea.status = 'pendente'
