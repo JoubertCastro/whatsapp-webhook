@@ -362,6 +362,107 @@ def atend_series():
     finally:
         cur.close(); conn.close()
 
+# --- NOVO: hora a hora (concluídos por hora + inbound por hora) ---
+@app.route("/api/atendimentos/hora_hora")
+def atend_hora_hora():
+    """
+    Retorna:
+    {
+      "concluidos": [{"hora":0,"qtd":N},...,{"hora":23,"qtd":M}],
+      "inbound":    [{"hora":0,"qtd":X},...,{"hora":23,"qtd":Y}]
+    }
+    Filtros: start, end, phone_id, agentes, motivo (opcional; aceita CSV).
+    """
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        start = request.args.get("start"); end = request.args.get("end"); phone_id = request.args.get("phone_id")
+        agentes_raw = request.args.get("agentes")
+        agentes = [int(x) for x in (agentes_raw or "").split(",") if x.strip().isdigit()]
+        # motivo(s) de conclusão — aceita CSV, case-insensitive
+        motivos_raw = request.args.get("motivo")  # ex: "Realizou negociação,Recusou a proposta"
+        motivos = [m.strip().lower() for m in motivos_raw.split(",")] if motivos_raw else []
+
+        # ---------- Concluídos hora a hora ----------
+        conds_b, params_b = [], []
+        if start:   conds_b.append("b.bloqueado_at::date >= %s"); params_b.append(start)
+        if end:     conds_b.append("b.bloqueado_at::date <= %s"); params_b.append(end)
+        if phone_id:conds_b.append("b.phone_id = %s"); params_b.append(phone_id)
+        if motivos:
+            conds_b.append("LOWER(b.motivo) = ANY(%s)"); params_b.append(motivos)
+
+        and_ag_b = ""
+        if agentes:
+            and_ag_b = "WHERE la.codigo_do_agente = ANY(%s)"
+            params_b.append(agentes)
+
+        sql_conc_h = f"""
+            WITH base AS (
+              SELECT b.telefone, b.phone_id, b.bloqueado_at, b.motivo
+              FROM tickets_bloqueados b
+              {("WHERE " + " AND ".join(conds_b)) if conds_b else ""}
+            ),
+            la AS (
+              SELECT x.telefone, x.phone_id, x.bloqueado_at,
+                     (SELECT t.codigo_do_agente
+                        FROM conversas_em_andamento t
+                       WHERE t.telefone=x.telefone AND t.phone_id=x.phone_id AND t.ended_at IS NOT NULL
+                       ORDER BY t.ended_at DESC LIMIT 1) AS codigo_do_agente
+              FROM base x
+            ),
+            f AS (
+              SELECT EXTRACT(HOUR FROM bloqueado_at)::int AS hora
+              FROM la
+              {and_ag_b}
+            )
+            SELECT gs.hora, COALESCE(COUNT(f.hora),0)::bigint AS qtd
+            FROM generate_series(0,23) AS gs(hora)
+            LEFT JOIN f ON f.hora = gs.hora
+            GROUP BY gs.hora
+            ORDER BY gs.hora
+        """
+        cur.execute(sql_conc_h, tuple(params_b))
+        concluidos = cur.fetchall()  # [{"hora":0,"qtd":...},...]
+
+        # ---------- Inbound hora a hora ----------
+        conds_m, params_m = ["m.direcao='in'"], []
+        if start:   conds_m.append("m.data_hora::date >= %s"); params_m.append(start)
+        if end:     conds_m.append("m.data_hora::date <= %s"); params_m.append(end)
+        if phone_id:conds_m.append("m.phone_number_id = %s"); params_m.append(phone_id)
+
+        and_ag_m = ""
+        if agentes:
+            and_ag_m = """
+              AND (
+                SELECT t.codigo_do_agente
+                FROM conversas_em_andamento t
+                WHERE (t.telefone = m.remetente OR t.telefone = regexp_replace(m.remetente, '(?<=^55\\d{2})9', '', 'g'))
+                  AND t.phone_id = m.phone_number_id
+                ORDER BY t.ended_at DESC NULLS LAST, t.started_at DESC
+                LIMIT 1
+              ) = ANY(%s)
+            """
+            params_m.append(agentes)
+
+        sql_in_h = f"""
+            WITH f AS (
+              SELECT EXTRACT(HOUR FROM m.data_hora)::int AS hora
+              FROM mensagens m
+              WHERE {" AND ".join(conds_m)}
+              {and_ag_m}
+            )
+            SELECT gs.hora, COALESCE(COUNT(f.hora),0)::bigint AS qtd
+            FROM generate_series(0,23) AS gs(hora)
+            LEFT JOIN f ON f.hora = gs.hora
+            GROUP BY gs.hora
+            ORDER BY gs.hora
+        """
+        cur.execute(sql_in_h, tuple(params_m))
+        inbound = cur.fetchall()
+
+        return jsonify({"concluidos": concluidos, "inbound": inbound})
+    finally:
+        cur.close(); conn.close()
+
 @app.route("/api/agentes")
 def listar_agentes():
     phone_id = request.args.get("phone_id")
