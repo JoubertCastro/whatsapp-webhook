@@ -563,6 +563,59 @@ def fila_status():
     finally:
         cur.close(); conn.close()
 
+@app.route("/api/envios", methods=["POST"])
+def criar_envio():
+    data = request.get_json(silent=True) or {}
+    nome = data.get("nome_disparo")
+    grupo = data.get("grupo_trabalho")
+    modo = data.get("modo_envio")
+    agendamento = data.get("data_hora_agendamento")
+    intervalo_msg = data.get("intervalo_msg")
+    tamanho_lote = data.get("tamanho_lote")
+    intervalo_lote = data.get("intervalo_lote")
+    contatos = data.get("contatos", [])
+
+    if not nome or not grupo:
+        return jsonify({"ok": False, "erro": "nome_disparo e grupo_trabalho são obrigatórios"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO envios (nome_disparo, grupo_trabalho, modo_envio, data_hora_agendamento,
+                                intervalo_msg, tamanho_lote, intervalo_lote,
+                                template, token, phone_id, waba_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
+        """, (
+            nome, grupo, modo, agendamento,
+            intervalo_msg, tamanho_lote, intervalo_lote,
+            json.dumps(data.get("template")),
+            data.get("token"),    
+            data.get("phone_id"), 
+            data.get("waba_id")   
+        ))
+
+        envio_id = cur.fetchone()["id"]
+
+        for c in contatos:
+            cur.execute("""
+                INSERT INTO envios_analitico (envio_id, nome_disparo, grupo_trabalho, telefone, conteudo, status)
+                VALUES (%s,%s,%s,%s,%s,'pendente')
+            """, (envio_id, nome, grupo, c.get("telefone"), c.get("conteudo")))
+
+
+        conn.commit()
+        return jsonify({"ok": True, "id": envio_id})
+    except Exception as e:
+        conn.rollback()
+        print("❌ Erro ao salvar envio:", e)
+        return jsonify({"ok": False, "erro": "erro ao salvar envio"}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
 # =========================
 # Run
 # =========================
