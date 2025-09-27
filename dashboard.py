@@ -65,9 +65,9 @@ def resumo():
         sql = f"""
             SELECT 
               COUNT(distinct left (msg_id,39)) total,
-              COUNT(distinct left (msg_id,39)) FILTER (WHERE status = 'sent') enviados,
-              COUNT(distinct left (msg_id,39)) FILTER (WHERE status = 'delivered') entregues,
-              COUNT(distinct left (msg_id,39)) FILTER (WHERE status = 'read') lidos
+              COUNT(distinct left (msg_id,39)) FILTER (WHERE status in ('sent','delivered','read')) enviados,
+              COUNT(distinct left (msg_id,39)) FILTER (WHERE status in ('delivered','read')) entregues,
+              COUNT(distinct left (msg_id,39)) FILTER (WHERE status in ('read')) lidos
             FROM status_mensagens
             {"WHERE " + " AND ".join(where) if where else ""}
         """
