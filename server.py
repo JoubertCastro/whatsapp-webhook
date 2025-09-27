@@ -615,6 +615,289 @@ def criar_envio():
         cur.close()
         conn.close()
 
+# =========================
+# Agendamentos (CRUD + ações)
+# =========================
+
+def _row_to_iso(dt):
+    # Converte datetime -> string ISO (mantém 'None' como None)
+    return dt.isoformat() if dt else None
+
+@app.route("/api/envios", methods=["GET"])
+def listar_envios():
+    """
+    Lista envios (imediatos e agendados) com agregados de status do analítico.
+    Aceita filtros opcionais via querystring:
+      - modo_envio=imediato|agendar
+      - status=pendente|pausado|cancelado|enviado|erro (filtra pelo analítico predominante)
+    """
+    modo = request.args.get("modo_envio")
+    status_filtro = request.args.get("status")
+
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        # Agregados por envio
+        cur.execute("""
+            SELECT
+              e.id,
+              e.nome_disparo,
+              e.grupo_trabalho,
+              e.criado_em,
+              e.modo_envio,
+              e.data_hora_agendamento,
+              e.intervalo_msg,
+              e.tamanho_lote,
+              e.intervalo_lote,
+              COALESCE(SUM( (ea.status='pendente')::int ),0)  AS pendentes,
+              COALESCE(SUM( (ea.status='pausado')::int ),0)   AS pausados,
+              COALESCE(SUM( (ea.status='cancelado')::int ),0) AS cancelados,
+              COALESCE(SUM( (ea.status='enviado')::int ),0)   AS enviados,
+              COALESCE(SUM( (ea.status='erro')::int ),0)      AS erros,
+              COUNT(ea.id) AS total
+            FROM envios e
+            LEFT JOIN envios_analitico ea ON ea.envio_id = e.id
+            GROUP BY e.id
+            ORDER BY e.criado_em DESC
+        """)
+        rows = cur.fetchall()
+
+        # Filtragem em memória (simples) se usuário pediu
+        def computa_status_geral(r):
+            # Deriva um "status geral" do envio:
+            #  - se cancelados == total_pendentes+pausados (todos remanescentes cancelados) -> 'cancelado'
+            #  - se enviados == total e erros == 0 -> 'concluido'
+            #  - se enviados > 0 e pendentes+pausados > 0 -> 'em_andamento'
+            #  - se pausados > 0 e pendentes == 0 -> 'pausado'
+            #  - se pendentes > 0 -> 'agendado' (ou 'pendente')
+            tot = r["total"] or 0
+            pen, pau, can, env, err = r["pendentes"], r["pausados"], r["cancelados"], r["enviados"], r["erros"]
+            if tot > 0 and env == tot and err == 0:
+                return "concluido"
+            if (pen + pau) == 0 and env == 0 and can > 0:
+                return "cancelado"
+            if env > 0 and (pen + pau) > 0:
+                return "em_andamento"
+            if pau > 0 and pen == 0:
+                return "pausado"
+            if pen > 0:
+                return "agendado"
+            # fallback
+            return "imediato" if r["modo_envio"] == "imediato" else "agendado"
+
+        resp = []
+        for r in rows:
+            if modo and r["modo_envio"] != modo:
+                continue
+            geral = computa_status_geral(r)
+            if status_filtro and status_filtro != geral:
+                continue
+
+            resp.append({
+                "id": r["id"],
+                "nome_disparo": r["nome_disparo"],
+                "grupo_trabalho": r["grupo_trabalho"],
+                "criado_em": _row_to_iso(r["criado_em"]),
+                "modo_envio": r["modo_envio"],
+                "data_hora_agendamento": _row_to_iso(r["data_hora_agendamento"]),
+                "intervalo_msg": r["intervalo_msg"],
+                "tamanho_lote": r["tamanho_lote"],
+                "intervalo_lote": r["intervalo_lote"],
+                "totais": {
+                    "total": r["total"],
+                    "pendentes": r["pendentes"],
+                    "pausados": r["pausados"],
+                    "cancelados": r["cancelados"],
+                    "enviados": r["enviados"],
+                    "erros": r["erros"],
+                },
+                "status_geral": geral,
+            })
+        return jsonify(resp)
+    except Exception as e:
+        print("❌ /api/envios [GET]:", e)
+        return jsonify({"ok": False, "erro": "erro ao listar envios"}), 500
+    finally:
+        cur.close(); conn.close()
+
+
+@app.route("/api/envios/<int:envio_id>", methods=["GET"])
+def obter_envio(envio_id: int):
+    """Retorna o envio e, opcionalmente, contatos (paginado). Use ?with_contatos=1&status=pendente&limit=100&offset=0"""
+    with_contatos = request.args.get("with_contatos") == "1"
+    status_f = request.args.get("status")
+    limit = int(request.args.get("limit") or 200)
+    offset = int(request.args.get("offset") or 0)
+
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, nome_disparo, grupo_trabalho, criado_em, modo_envio, data_hora_agendamento,
+                   intervalo_msg, tamanho_lote, intervalo_lote, template, token, phone_id, waba_id
+            FROM envios WHERE id=%s
+        """, (envio_id,))
+        e = cur.fetchone()
+        if not e:
+            return not_found("Envio não encontrado")
+
+        result = {
+            "id": e["id"],
+            "nome_disparo": e["nome_disparo"],
+            "grupo_trabalho": e["grupo_trabalho"],
+            "criado_em": _row_to_iso(e["criado_em"]),
+            "modo_envio": e["modo_envio"],
+            "data_hora_agendamento": _row_to_iso(e["data_hora_agendamento"]),
+            "intervalo_msg": e["intervalo_msg"],
+            "tamanho_lote": e["tamanho_lote"],
+            "intervalo_lote": e["intervalo_lote"],
+            "template": e["template"],
+            "phone_id": e["phone_id"],
+            "waba_id": e["waba_id"]
+        }
+
+        if with_contatos:
+            params = [envio_id]
+            where = "WHERE envio_id=%s"
+            if status_f:
+                where += " AND status=%s"
+                params.append(status_f)
+
+            cur.execute(f"""
+                SELECT id, telefone, conteudo, status, data_hora
+                FROM envios_analitico
+                {where}
+                ORDER BY id
+                LIMIT %s OFFSET %s
+            """, (*params, limit, offset))
+            result["contatos"] = cur.fetchall()
+
+        return jsonify(result)
+    except Exception as e:
+        print("❌ /api/envios/<id> [GET]:", e)
+        return jsonify({"ok": False, "erro": "erro ao obter envio"}), 500
+    finally:
+        cur.close(); conn.close()
+
+
+@app.route("/api/envios/<int:envio_id>", methods=["PUT"])
+def editar_envio(envio_id: int):
+    """
+    Edita campos do envio. Corpo JSON pode conter qualquer um dos campos:
+      - nome_disparo, grupo_trabalho, modo_envio, data_hora_agendamento,
+        intervalo_msg, tamanho_lote, intervalo_lote, template, token, phone_id, waba_id
+    Obs.: edição não mexe nos contatos já cadastrados (envios_analitico).
+    """
+    data = request.get_json(silent=True) or {}
+    allowed = ["nome_disparo","grupo_trabalho","modo_envio","data_hora_agendamento",
+               "intervalo_msg","tamanho_lote","intervalo_lote","template","token","phone_id","waba_id"]
+
+    sets, params = [], []
+    for k in allowed:
+        if k in data:
+            sets.append(f"{k}=%s")
+            # jsonb precisa de json.dumps
+            if k == "template" and data[k] is not None and not isinstance(data[k], str):
+                params.append(json.dumps(data[k]))
+            else:
+                params.append(data[k])
+
+    if not sets:
+        return bad_request("Nenhum campo para atualizar")
+
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT 1 FROM envios WHERE id=%s", (envio_id,))
+        if not cur.fetchone():
+            return not_found("Envio não encontrado")
+
+        cur.execute(f"UPDATE envios SET {', '.join(sets)} WHERE id=%s", (*params, envio_id))
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        print("❌ /api/envios/<id> [PUT]:", e)
+        return jsonify({"ok": False, "erro": "erro ao editar envio"}), 500
+    finally:
+        cur.close(); conn.close()
+
+
+@app.route("/api/envios/<int:envio_id>", methods=["DELETE"])
+def excluir_envio(envio_id: int):
+    """Exclui o envio e seus contatos (CASCADE já configurado)."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM envios WHERE id=%s RETURNING id", (envio_id,))
+        row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return not_found("Envio não encontrado")
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        print("❌ /api/envios/<id> [DELETE]:", e)
+        return jsonify({"ok": False, "erro": "erro ao excluir envio"}), 500
+    finally:
+        cur.close(); conn.close()
+
+
+@app.route("/api/envios/<int:envio_id>/pause", methods=["PATCH"])
+def pausar_envio(envio_id: int):
+    """
+    Pausa um envio trocando itens 'pendente' -> 'pausado' no analítico.
+    O worker só lê 'pendente', então isso efetivamente pausa.
+    """
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE envios_analitico SET status='pausado' WHERE envio_id=%s AND status='pendente' RETURNING id", (envio_id,))
+        qtd = cur.rowcount
+        conn.commit()
+        return jsonify({"ok": True, "afetados": qtd})
+    except Exception as e:
+        conn.rollback()
+        print("❌ /api/envios/<id>/pause [PATCH]:", e)
+        return jsonify({"ok": False, "erro": "erro ao pausar envio"}), 500
+    finally:
+        cur.close(); conn.close()
+
+
+@app.route("/api/envios/<int:envio_id>/resume", methods=["PATCH"])
+def retomar_envio(envio_id: int):
+    """Retoma um envio trocando 'pausado' -> 'pendente'."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE envios_analitico SET status='pendente' WHERE envio_id=%s AND status='pausado' RETURNING id", (envio_id,))
+        qtd = cur.rowcount
+        conn.commit()
+        return jsonify({"ok": True, "afetados": qtd})
+    except Exception as e:
+        conn.rollback()
+        print("❌ /api/envios/<id>/resume [PATCH]:", e)
+        return jsonify({"ok": False, "erro": "erro ao retomar envio"}), 500
+    finally:
+        cur.close(); conn.close()
+
+
+@app.route("/api/envios/<int:envio_id>/cancel", methods=["PATCH"])
+def cancelar_envio(envio_id: int):
+    """Cancela um envio trocando 'pendente'/'pausado' -> 'cancelado'."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE envios_analitico
+               SET status='cancelado'
+             WHERE envio_id=%s
+               AND status IN ('pendente','pausado')
+            RETURNING id
+        """, (envio_id,))
+        qtd = cur.rowcount
+        conn.commit()
+        return jsonify({"ok": True, "afetados": qtd})
+    except Exception as e:
+        conn.rollback()
+        print("❌ /api/envios/<id>/cancel [PATCH]:", e)
+        return jsonify({"ok": False, "erro": "erro ao cancelar envio"}), 500
+    finally:
+        cur.close(); conn.close()
+
 
 # =========================
 # Run
