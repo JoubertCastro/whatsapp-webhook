@@ -16,7 +16,10 @@ BASE_DIR = Path(__file__).resolve().parent
 # ==========================
 # Config via ambiente
 # ==========================
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
+)
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_ID = os.getenv("PHONE_ID")
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v23.0")
@@ -28,6 +31,8 @@ ALLOWED_WABA_IDS = set(filter(None, os.getenv("ALLOWED_WABA_IDS", "").split(",")
 # ==========================
 # Conexão Postgres
 # ==========================
+
+
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
