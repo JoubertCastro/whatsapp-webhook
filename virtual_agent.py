@@ -41,8 +41,12 @@ def get_conn():
 # Auxiliares WhatsApp API
 # ==========================
 
-def send_wa_text(to: str, body: str) -> Dict[str, Any]:
-    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_ID}/messages"
+# --- envio de texto ---
+def send_wa_text(to: str, body: str, phone_id: Optional[str] = None) -> Dict[str, Any]:
+    pid = phone_id or PHONE_ID
+    if not pid:
+        return {"error": {"message": "PHONE_ID ausente"}}
+    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{pid}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json",
@@ -51,7 +55,7 @@ def send_wa_text(to: str, body: str) -> Dict[str, Any]:
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
-        "text": {"preview_url": False, "body": body[:4000]},  # limite WA
+        "text": {"preview_url": False, "body": body[:4000]},
     }
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     try:
@@ -60,16 +64,19 @@ def send_wa_text(to: str, body: str) -> Dict[str, Any]:
         r.close()
 
 
-def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]]) -> Dict[str, Any]:
-    """Envia quick replies (botões) usando message template de interactive."""
-    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_ID}/messages"
+# --- envio de botões ---
+def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]], phone_id: Optional[str] = None) -> Dict[str, Any]:
+    pid = phone_id or PHONE_ID
+    if not pid:
+        return {"error": {"message": "PHONE_ID ausente"}}
+    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{pid}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json",
     }
     buttons = [
         {"type": "reply", "reply": {"id": v[:256], "title": l[:20]}}
-        for (l, v) in options[:3]  # WA limita a 3 botões de resposta rápida
+        for (l, v) in options[:3]
     ]
     payload = {
         "messaging_product": "whatsapp",
@@ -86,6 +93,7 @@ def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]]) -> Dict[
         return r.json()
     finally:
         r.close()
+
 
 # ==========================
 # Motor de fluxo
@@ -358,7 +366,13 @@ class Engine:
 # Função plug-and-play para o webhook
 # ==========================
 
-def handle_incoming(wa_phone: str, incoming_text: Optional[str], flow_file: str, contact: Optional[Dict[str, Any]] = None) -> None:
+def handle_incoming(
+    wa_phone: str,
+    incoming_text: Optional[str],
+    flow_file: str,
+    contact: Optional[Dict[str, Any]] = None,
+    phone_id: Optional[str] = None,   # << NOVO
+) -> None:
     """Chame esta função dentro do seu webhook para processar mensagens recebidas.
 
     Args:
@@ -389,10 +403,10 @@ def handle_incoming(wa_phone: str, incoming_text: Optional[str], flow_file: str,
     # envia mensagens
     for msg in out_msgs:
         if msg["type"] == "text":
-            resp = send_wa_text(wa_phone, msg["text"])
+            resp = send_wa_text(wa_phone, msg["text"], phone_id=phone_id)
             Store.log(wa_phone, "out", {"request": msg, "response": resp})
         elif msg["type"] == "buttons":
-            resp = send_wa_buttons(wa_phone, msg["text"], msg["options"]) 
+            resp = send_wa_buttons(wa_phone, msg["text"], msg["options"], phone_id=phone_id)
             Store.log(wa_phone, "out", {"request": msg, "response": resp})
 
     # persiste sessão

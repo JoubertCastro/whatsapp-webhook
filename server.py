@@ -273,7 +273,6 @@ def webhook():
                 remetente = msg.get("from", "desconhecido")
                 tipo = msg.get("type")
 
-                # Texto para o agente
                 texto = None
                 if tipo == "text":
                     texto = msg.get("text", {}).get("body")
@@ -287,11 +286,17 @@ def webhook():
 
                 contact = {
                     "nome": (value.get("contacts") or [{}])[0].get("profile", {}).get("name"),
-                    "cpf": None
+                    "cpf": None,
                 }
 
-                # Chama o agente para CADA mensagem
-                handle_incoming(remetente, texto, flow_file=flow_file, contact=contact)
+                handle_incoming(
+                    remetente,
+                    texto,
+                    flow_file=flow_file,
+                    contact=contact,
+                    phone_id=phone_number_id,   # << AQUI o dinâmico
+                )
+
 
         # 3) Status
         for st in statuses:
