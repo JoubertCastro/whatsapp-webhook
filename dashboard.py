@@ -397,7 +397,7 @@ def atend_hora_hora():
 
         sql_conc_h = f"""
             WITH base AS (
-              SELECT b.telefone, b.phone_id, b.bloqueado_at, b.motivo
+              SELECT b.telefone, b.phone_id, b.bloqueado_at AT TIME ZONE 'UTC' as bloqueado_at, b.motivo
               FROM tickets_bloqueados b
               {("WHERE " + " AND ".join(conds_b)) if conds_b else ""}
             ),
