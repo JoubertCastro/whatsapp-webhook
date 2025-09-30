@@ -2,11 +2,40 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime, timezone, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
+from virtual_agent import handle_incoming, ALLOWED_PHONE_IDS, ALLOWED_WABA_IDS
 import psycopg2
 import psycopg2.extras
 import json
 import os
 
+def _bot_account_allowed(phone_id: str, waba_id: str|None) -> tuple[bool, str]:
+    """
+    Retorna (allowed, flow_file). Verifica DB (bot_accounts) e fallback p/ ENV.
+    """
+    allowed = False
+    flow_file = "flows/onboarding.yaml"
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("SELECT enabled, flow_file FROM bot_accounts WHERE phone_id=%s", (phone_id,))
+        row = cur.fetchone()
+        if row:
+            allowed = bool(row["enabled"])
+            flow_file = row["flow_file"] or flow_file
+        cur.close(); conn.close()
+    except Exception:
+        pass
+
+    # fallback ENV
+    if not allowed and ALLOWED_PHONE_IDS:
+        if str(phone_id) in ALLOWED_PHONE_IDS:
+            allowed = True
+
+    # checagem (opcional) por WABA
+    if allowed and ALLOWED_WABA_IDS and waba_id:
+        if str(waba_id) not in ALLOWED_WABA_IDS:
+            allowed = False
+
+    return allowed, flow_file
 
 # =========================
 # Config
@@ -206,13 +235,21 @@ def webhook():
         phone_number_id = value.get("metadata", {}).get("phone_number_id")
         display_phone_number = value.get("metadata", {}).get("display_phone_number")
 
-        # Mensagens
-        for msg in value.get("messages", []):
+        messages = value.get("messages", [])
+        statuses = value.get("statuses", [])
+
+        # 1) Salva mensagens recebidas
+        for msg in messages:
             remetente = msg.get("from", "desconhecido")
             msg_id = msg.get("id")
             tipo = msg.get("type")
+
             if tipo == "text":
                 texto = msg.get("text", {}).get("body")
+            elif tipo == "interactive":
+                inter = msg.get("interactive", {})
+                btn = inter.get("button_reply") or {}
+                texto = btn.get("title") or btn.get("id") or "[interactive]"
             elif tipo == "button":
                 b = msg.get("button", {})
                 texto = f"{b.get('text')} (payload: {b.get('payload')})"
@@ -227,8 +264,37 @@ def webhook():
                 raw=msg, phone_number_id=phone_number_id, display_phone_number=display_phone_number
             )
 
-        # Status
-        for st in value.get("statuses", []):
+        # 2) Gate por conta + agente virtual
+        waba_id = value.get("business", {}).get("id") or value.get("waba_id")
+        allowed, flow_file = _bot_account_allowed(phone_number_id, waba_id)
+
+        if allowed:
+            for msg in messages:
+                remetente = msg.get("from", "desconhecido")
+                tipo = msg.get("type")
+
+                # Texto para o agente
+                texto = None
+                if tipo == "text":
+                    texto = msg.get("text", {}).get("body")
+                elif tipo == "interactive":
+                    inter = msg.get("interactive", {})
+                    btn = inter.get("button_reply") or {}
+                    texto = btn.get("id") or btn.get("title")
+                elif tipo == "button":
+                    b = msg.get("button", {})
+                    texto = b.get("payload") or b.get("text")
+
+                contact = {
+                    "nome": (value.get("contacts") or [{}])[0].get("profile", {}).get("name"),
+                    "cpf": None
+                }
+
+                # Chama o agente para CADA mensagem
+                handle_incoming(remetente, texto, flow_file=flow_file, contact=contact)
+
+        # 3) Status
+        for st in statuses:
             salvar_status(
                 st.get("id"), st.get("recipient_id"), st.get("status"), st,
                 st.get("timestamp"), phone_number_id=phone_number_id, display_phone_number=display_phone_number
@@ -236,6 +302,7 @@ def webhook():
 
     except Exception as e:
         print("❌ Erro ao processar webhook:", e)
+
 
     return "EVENT_RECEIVED", 200
 

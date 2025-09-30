@@ -13,3 +13,4 @@ uvicorn
 sqlalchemy
 pyodbc
 pymssql
+PyYAML
