@@ -290,13 +290,14 @@ def webhook():
                 }
 
                 handle_incoming(
-                    remetente,
-                    texto,
+                    wa_phone=remetente,
+                    incoming_text=texto,
                     flow_file=flow_file,
                     contact=contact,
-                    phone_id=phone_number_id,   # << AQUI o dinâmico
+                    phone_id=phone_number_id,   # dinâmico
+                    waba_id=waba_id             # dinâmico
+                    # sem token -> usa WHATSAPP_TOKEN global
                 )
-
 
         # 3) Status
         for st in statuses:

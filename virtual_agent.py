@@ -23,6 +23,7 @@ DATABASE_URL = os.getenv(
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_ID = os.getenv("PHONE_ID")
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v23.0")
+WABA_ID = os.getenv("WABA_ID", "")
 
 # Restrição opcional por conta/phone_id (se definido, o webhook só processa esses IDs)
 ALLOWED_PHONE_IDS = set(filter(None, os.getenv("ALLOWED_PHONE_IDS", "").split(",")))  # ex: "732661079928516"
@@ -42,13 +43,14 @@ def get_conn():
 # ==========================
 
 # --- envio de texto ---
-def send_wa_text(to: str, body: str, phone_id: Optional[str] = None) -> Dict[str, Any]:
+def send_wa_text(to: str, body: str, phone_id: Optional[str] = None, token: Optional[str] = None) -> Dict[str, Any]:
     pid = phone_id or PHONE_ID
+    tok = token or WHATSAPP_TOKEN
     if not pid:
         return {"error": {"message": "PHONE_ID ausente"}}
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{pid}/messages"
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Authorization": f"Bearer {tok}",
         "Content-Type": "application/json",
     }
     payload = {
@@ -63,15 +65,15 @@ def send_wa_text(to: str, body: str, phone_id: Optional[str] = None) -> Dict[str
     finally:
         r.close()
 
-
 # --- envio de botões ---
-def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]], phone_id: Optional[str] = None) -> Dict[str, Any]:
+def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]], phone_id: Optional[str] = None, token: Optional[str] = None) -> Dict[str, Any]:
     pid = phone_id or PHONE_ID
+    tok = token or WHATSAPP_TOKEN
     if not pid:
         return {"error": {"message": "PHONE_ID ausente"}}
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{pid}/messages"
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Authorization": f"Bearer {tok}",
         "Content-Type": "application/json",
     }
     buttons = [
@@ -361,6 +363,47 @@ class Engine:
 
         return session, out_messages
 
+def _extract_msg_id(resp_json: Dict[str, Any]) -> Optional[str]:
+    try:
+        msgs = resp_json.get("messages")
+        if isinstance(msgs, list) and msgs:
+            return msgs[0].get("id")
+    except Exception:
+        pass
+    return None
+
+def _save_outgoing_to_avulsas(
+    telefone: str,
+    conteudo: str,
+    phone_id: str,
+    waba_id: Optional[str],
+    status: str,
+    msg_id: Optional[str],
+    resposta_raw: Optional[Dict[str, Any]],
+    nome_exibicao: str = "Agente Virtual"
+) -> None:
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO mensagens_avulsas
+                    (nome_exibicao, remetente, conteudo, phone_id, waba_id, status, msg_id, resposta_raw)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                """,
+                (
+                    nome_exibicao,
+                    telefone,
+                    conteudo,
+                    phone_id,
+                    waba_id,
+                    status,
+                    msg_id,
+                    json.dumps(resposta_raw) if resposta_raw is not None else None,
+                ),
+            )
+    except Exception:
+        # não derruba o fluxo se o log falhar
+        pass
 
 # ==========================
 # Função plug-and-play para o webhook
@@ -371,16 +414,10 @@ def handle_incoming(
     incoming_text: Optional[str],
     flow_file: str,
     contact: Optional[Dict[str, Any]] = None,
-    phone_id: Optional[str] = None,   # << NOVO
+    phone_id: Optional[str] = None,
+    waba_id: Optional[str] = None,
+    token: Optional[str] = None,
 ) -> None:
-    """Chame esta função dentro do seu webhook para processar mensagens recebidas.
-
-    Args:
-        wa_phone: número do cliente (e.g. '5561999998888')
-        incoming_text: texto recebido do cliente (ou None no primeiro contato)
-        flow_file: caminho para o YAML do fluxo (e.g. 'flows/onboarding.yaml')
-        contact: dict opcional com dados do contato (nome, cpf etc.)
-    """
     Store.log(wa_phone, "in", {"text": incoming_text or ""})
 
     flow = Flow.load_from_file(flow_file)
@@ -388,26 +425,57 @@ def handle_incoming(
     if not session:
         session = Session(wa_phone=wa_phone, flow_id=flow.flow_id, node_id=flow.start, ctx={}, contact=contact or {}, assigned="virtual")
     else:
-        # se sessão existir mas for de outro fluxo, reinicia no novo
         if session.flow_id != flow.flow_id:
             session.flow_id = flow.flow_id
             session.node_id = flow.start
-
-        # atualiza dados de contato se fornecido
         if contact:
             session.contact.update(contact)
 
     engine = Engine(flow)
     session, out_msgs = engine.step(session, incoming_text)
 
-    # envia mensagens
+    pid = phone_id or PHONE_ID
+    wid = waba_id or WABA_ID
+
     for msg in out_msgs:
         if msg["type"] == "text":
-            resp = send_wa_text(wa_phone, msg["text"], phone_id=phone_id)
-            Store.log(wa_phone, "out", {"request": msg, "response": resp})
-        elif msg["type"] == "buttons":
-            resp = send_wa_buttons(wa_phone, msg["text"], msg["options"], phone_id=phone_id)
-            Store.log(wa_phone, "out", {"request": msg, "response": resp})
+            resp = send_wa_text(wa_phone, msg["text"], phone_id=pid, token=token)
+            Store.log(wa_phone, "out", {"request": {**msg, "phone_id": pid, "waba_id": wid}, "response": resp})
 
-    # persiste sessão
+            conteudo = msg["text"]
+            mid = _extract_msg_id(resp)
+            status = "enviado" if mid else "erro"
+
+            _save_outgoing_to_avulsas(
+                telefone=wa_phone,
+                conteudo=conteudo,
+                phone_id=pid or "",
+                waba_id=wid or None,
+                status=status,
+                msg_id=mid,
+                resposta_raw=resp,
+                nome_exibicao="Agente Virtual",
+            )
+
+        elif msg["type"] == "buttons":
+            resp = send_wa_buttons(wa_phone, msg["text"], msg["options"], phone_id=pid, token=token)
+            Store.log(wa_phone, "out", {"request": {**msg, "phone_id": pid, "waba_id": wid}, "response": resp})
+
+            opts_txt = "\n".join([f"- {label} ({value})" for label, value in msg.get("options", [])])
+            conteudo = msg["text"] + (f"\n\nOpções:\n{opts_txt}" if opts_txt else "")
+
+            mid = _extract_msg_id(resp)
+            status = "enviado" if mid else "erro"
+
+            _save_outgoing_to_avulsas(
+                telefone=wa_phone,
+                conteudo=conteudo,
+                phone_id=pid or "",
+                waba_id=wid or None,
+                status=status,
+                msg_id=mid,
+                resposta_raw=resp,
+                nome_exibicao="Agente Virtual",
+            )
+
     Store.upsert_session(session)
