@@ -1,0 +1,62 @@
+flow_id: onboarding
+start: welcome
+
+intents:
+  boleto:
+    any: ["boleto", "2a via", "2ª via", "segunda via", "linha digitável"]
+  humano:
+    any: ["atendente", "humano", "suporte", "falar com alguém"]
+
+nodes:
+  welcome:
+    type: message
+    text: |
+      Olá {{contact.nome or ""}} 👋 Sou o assistente virtual da ConnectZap.
+      Posso te ajudar com 2ª via de boleto, status, ou te encaminho a um atendente.
+    next: ask_name
+
+  ask_name:
+    type: question
+    text: "Como você prefere ser chamado(a)?"
+    save_as: name
+    next: ask_goal
+
+  ask_goal:
+    type: choice
+    text: "Prazer, {{ctx.name}}! Como posso ajudar hoje?"
+    options:
+      - label: "2ª via de boleto"
+        value: boleto
+        next: boleto_action
+      - label: "Falar com atendente"
+        value: humano
+        next: handoff
+    intent_map:
+      boleto: boleto_action
+      humano: handoff
+    fallback_next: handoff
+
+  boleto_action:
+    type: action
+    action: call_webhook
+    url: "https://seuservidor/api/boleto"
+    method: POST
+    body:
+      cpf: "{{contact.cpf}}"
+    on_success_next: send_boleto
+    on_error_next: handoff
+
+  send_boleto:
+    type: message
+    text: |
+      Pronto, {{ctx.name}}! 🧾 Aqui está seu boleto: {{ctx.boleto_url}}
+      Se precisar de mais alguma coisa, é só me dizer.
+    next: end
+
+  handoff:
+    type: handoff
+    text: "Ok! Vou te conectar com um atendente humano. Aguarde um instante."
+    next: end
+
+  end:
+    type: end
