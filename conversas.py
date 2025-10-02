@@ -19,6 +19,7 @@ CARTEIRA_TO_PHONE = {
     "Arc4U": "829210283602406",
     "Serasa": "713021321904495",
     "Mercado Pago Vendas": "803535039503723",
+    "Banco PAN": "805610009301153",
 }
 
 

@@ -481,6 +481,7 @@ def listar_agentes():
                   ('DivZero','779797401888141'),
                   ('Arc4U','829210283602406'),
                   ('Serasa','713021321904495'),
+                  ('Banco PAN','805610009301153'),
                   ('Mercado Pago Vendas','803535039503723')
                 ) AS m(nome,k)
                 WHERE k = %s
