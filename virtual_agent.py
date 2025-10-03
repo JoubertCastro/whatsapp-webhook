@@ -255,16 +255,23 @@ def _is_business_hours(now_dt: datetime) -> bool:
 # ==========================
 # Execução de nó
 # ==========================
+# ==========================
+# Execução de nó
+# ==========================
 class Engine:
     def __init__(self, flow: Flow):
         self.flow = flow
 
     def step(self, session: Session, incoming_text: Optional[str]) -> Tuple[Session, List[Dict[str, Any]]]:
         out_messages: List[Dict[str, Any]] = []
+
+        # segurança: se node inválido ou era 'end', reinicia
         node = self.flow.nodes.get(session.node_id)
-        if not node:
+        if not node or node.type == "end":
             session.node_id = self.flow.start
             node = self.flow.nodes[session.node_id]
+            # ao reiniciar, não considerar este incoming como resposta de pergunta
+            session.ctx.pop("_awaiting_question", None)
 
         progressed = True
         while progressed:
@@ -280,28 +287,41 @@ class Engine:
                     session.node_id = next_id
                     node = self.flow.nodes[next_id]
                     progressed = True
+                    # IMPORTANTE: não usar este incoming_text como resposta de uma pergunta recém-apresentada
+                    # a não ser que a pergunta já tivesse sido enviada antes
                     continue
 
             elif kind == "question":
-                if incoming_text is not None:
+                awaiting = session.ctx.get("_awaiting_question")
+
+                # Caso 1: já perguntamos antes e agora chegou a resposta
+                if incoming_text is not None and awaiting == node.id:
                     save_as = data.get("save_as")
                     if save_as:
                         session.ctx[save_as] = incoming_text.strip()[:120]
+                    # limpamos o estado de "aguardando"
+                    session.ctx.pop("_awaiting_question", None)
+                    # avançamos
                     session.node_id = data.get("next")
                     node = self.flow.nodes[session.node_id]
                     progressed = True
                     incoming_text = None  # consumiu a entrada
                     continue
-                else:
-                    text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
-                    out_messages.append({"type": "text", "text": text})
+
+                # Caso 2: ainda não perguntamos (neste node) → perguntar agora e marcar aguardando
+                text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
+                out_messages.append({"type": "text", "text": text})
+                session.ctx["_awaiting_question"] = node.id
+                # não progride; espera a próxima mensagem do cliente
+                break
 
             elif kind == "choice":
                 mapped = None
                 if incoming_text is not None:
                     for opt in data.get("options", []):
                         if str(incoming_text).strip().lower() == str(opt.get("value","")).strip().lower():
-                            mapped = opt.get("next"); break
+                            mapped = opt.get("next")
+                            break
                     if not mapped:
                         intent = detect_intent(incoming_text, self.flow.intents)
                         if intent:
@@ -311,14 +331,18 @@ class Engine:
                     node = self.flow.nodes[session.node_id]
                     progressed = True
                     incoming_text = None
+                    # ao sair de choice, garanta que não estamos esperando pergunta antiga
+                    session.ctx.pop("_awaiting_question", None)
                     continue
+
                 text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
                 opts = [(opt.get("label"), opt.get("value")) for opt in data.get("options", [])]
                 out_messages.append({"type": "buttons", "text": text, "options": opts})
+                break  # aguarda interação do usuário
 
             elif kind == "action":
                 act = data.get("action")
-                # --- call_webhook ---
+
                 if act == "call_webhook":
                     url = render_text(data.get("url", ""), {"ctx": session.ctx, "contact": session.contact})
                     method = (data.get("method") or "GET").upper()
@@ -338,22 +362,21 @@ class Engine:
                         session.node_id = data.get("on_error_next") or data.get("fallback_next") or session.node_id
                     node = self.flow.nodes[session.node_id]
                     progressed = True
+                    # qualquer ação cancela "aguardando pergunta" antiga
+                    session.ctx.pop("_awaiting_question", None)
                     continue
 
-                # --- delay (bloqueia até N segundos e segue) ---
                 elif act == "delay":
-                    # só faz sentido após uma resposta do usuário; se cair aqui sem ter havido
-                    # resposta (incoming_text is None), apenas segue para não travar o fluxo
                     seconds = int(data.get("seconds") or 0)
-                    seconds = max(0, min(seconds, 30))  # safety cap
+                    seconds = max(0, min(seconds, 30))
                     if seconds > 0:
                         time.sleep(seconds)
                     session.node_id = data.get("next") or session.node_id
                     node = self.flow.nodes[session.node_id]
                     progressed = True
+                    session.ctx.pop("_awaiting_question", None)
                     continue
 
-                # --- business_hours_gate ---
                 elif act == "business_hours_gate":
                     tz = data.get("timezone") or "America/Sao_Paulo"
                     now_dt = _now_in_tz(tz)
@@ -365,16 +388,16 @@ class Engine:
                         session.node_id = data["off_hours_next"]
                     elif data.get("next"):
                         session.node_id = data["next"]
-                    # se nada configurado, fica no mesmo nó (evita crash)
                     node = self.flow.nodes.get(session.node_id, node)
                     progressed = True
+                    session.ctx.pop("_awaiting_question", None)
                     continue
 
                 else:
-                    # ação desconhecida: apenas segue fallback/next se houver
                     session.node_id = data.get("fallback_next") or data.get("next") or session.node_id
                     node = self.flow.nodes.get(session.node_id, node)
                     progressed = True
+                    session.ctx.pop("_awaiting_question", None)
                     continue
 
             elif kind == "handoff":
@@ -386,15 +409,19 @@ class Engine:
                     session.node_id = next_id
                     node = self.flow.nodes[next_id]
                     progressed = True
+                    session.ctx.pop("_awaiting_question", None)
                     continue
+                break
 
             elif kind == "end":
-                # Nó terminal: não envia nada automaticamente.
-                pass
+                # nó terminal: encerra loop
+                session.ctx.pop("_awaiting_question", None)
+                break
 
             else:
                 out_messages.append({"type": "text", "text": "Desculpe, tive um imprevisto técnico. Vou te redirecionar a um atendente."})
                 session.assigned = "human"
+                session.ctx.pop("_awaiting_question", None)
                 break
 
         return session, out_messages
