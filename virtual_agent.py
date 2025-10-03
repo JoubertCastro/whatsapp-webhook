@@ -11,14 +11,13 @@ import psycopg2
 import psycopg2.extras
 import requests
 import yaml
-BASE_DIR = Path(__file__).resolve().parent
-
 from datetime import datetime, time as dtime, timezone, timedelta
 try:
     from zoneinfo import ZoneInfo  # py>=3.9
 except ImportError:
     ZoneInfo = None
 
+BASE_DIR = Path(__file__).resolve().parent
 
 # ==========================
 # Config via ambiente
@@ -27,19 +26,18 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
 )
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")  # token fixo (por escolha sua)
 PHONE_ID = os.getenv("PHONE_ID")
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v23.0")
 WABA_ID = os.getenv("WABA_ID", "")
 
-# Restrição opcional por conta/phone_id (se definido, o webhook só processa esses IDs)
-ALLOWED_PHONE_IDS = set(filter(None, os.getenv("ALLOWED_PHONE_IDS", "").split(",")))  # ex: "732661079928516"
-ALLOWED_WABA_IDS = set(filter(None, os.getenv("ALLOWED_WABA_IDS", "").split(",")))    # ex: "1910445533050310" (nem sempre vem no webhook)
+# Restrição opcional por conta/phone_id
+ALLOWED_PHONE_IDS = set(filter(None, os.getenv("ALLOWED_PHONE_IDS", "").split(",")))
+ALLOWED_WABA_IDS = set(filter(None, os.getenv("ALLOWED_WABA_IDS", "").split(",")))
 
 # ==========================
 # Conexão Postgres
 # ==========================
-
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -47,7 +45,6 @@ def get_conn():
 # Auxiliares WhatsApp API
 # ==========================
 
-# --- envio de texto ---
 def send_wa_text(to: str, body: str, phone_id: Optional[str] = None, token: Optional[str] = None) -> Dict[str, Any]:
     pid = phone_id or PHONE_ID
     tok = token or WHATSAPP_TOKEN
@@ -70,7 +67,6 @@ def send_wa_text(to: str, body: str, phone_id: Optional[str] = None, token: Opti
     finally:
         r.close()
 
-# --- envio de botões ---
 def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]], phone_id: Optional[str] = None, token: Optional[str] = None) -> Dict[str, Any]:
     pid = phone_id or PHONE_ID
     tok = token or WHATSAPP_TOKEN
@@ -101,7 +97,6 @@ def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]], phone_id
     finally:
         r.close()
 
-
 # ==========================
 # Motor de fluxo
 # ==========================
@@ -131,7 +126,6 @@ class Flow:
             spec = yaml.safe_load(f)
         return Flow(spec)
 
-
 # ==========================
 # Sessão e armazenamento
 # ==========================
@@ -144,7 +138,6 @@ class Session:
     ctx: Dict[str, Any] = field(default_factory=dict)
     contact: Dict[str, Any] = field(default_factory=dict)
     assigned: str = "virtual"
-
 
 class Store:
     @staticmethod
@@ -202,15 +195,12 @@ class Store:
         except Exception:
             pass
 
-
 # ==========================
-# Render de templates simples
+# Render simples
 # ==========================
-
 def render_text(tpl: str, ctx: Dict[str, Any]) -> str:
     def repl(m: re.Match) -> str:
         expr = m.group(1).strip()
-        # suporte a fallback: foo.bar or "alguma coisa"
         fallback = ""
         if " or " in expr:
             left, right = expr.split(" or ", 1)
@@ -218,7 +208,6 @@ def render_text(tpl: str, ctx: Dict[str, Any]) -> str:
             mfb = re.match(r'^[\'"](.*?)[\'"]$', right.strip())
             if mfb:
                 fallback = mfb.group(1)
-        # resolve path com pontos
         parts = expr.split(".")
         val: Any = ctx
         for p in parts:
@@ -228,11 +217,9 @@ def render_text(tpl: str, ctx: Dict[str, Any]) -> str:
         return str(val) if val is not None else fallback
     return re.sub(r"\{\{([^}]+)\}\}", repl, tpl)
 
-
 # ==========================
-# Intents simples (palavras-chave/regex)
+# Intents simples
 # ==========================
-
 def detect_intent(text: str, intents: Dict[str, Any]) -> Optional[str]:
     t = (text or "").lower()
     for name, spec in intents.items():
@@ -244,23 +231,38 @@ def detect_intent(text: str, intents: Dict[str, Any]) -> Optional[str]:
             return name
     return None
 
+# ==========================
+# Helpers de horário comercial
+# ==========================
+def _now_in_tz(tz_name: str) -> datetime:
+    if tz_name and ZoneInfo:
+        try:
+            return datetime.now(ZoneInfo(tz_name))
+        except Exception:
+            pass
+    return datetime.now()  # fallback local
+
+def _is_business_hours(now_dt: datetime) -> bool:
+    # seg=0 ... dom=6
+    wd = now_dt.weekday()
+    t = now_dt.time()
+    if wd <= 4:  # seg-sex
+        return dtime(8, 0) <= t <= dtime(20, 0)
+    if wd == 5:  # sábado
+        return dtime(8, 0) <= t <= dtime(14, 0)
+    return False  # domingo
 
 # ==========================
 # Execução de nó
 # ==========================
-
 class Engine:
     def __init__(self, flow: Flow):
         self.flow = flow
 
     def step(self, session: Session, incoming_text: Optional[str]) -> Tuple[Session, List[Dict[str, Any]]]:
-        """Processa a entrada do usuário e retorna mensagens de saída.
-        Pode atravessar múltiplos nós automaticamente (message->next, etc.).
-        """
         out_messages: List[Dict[str, Any]] = []
         node = self.flow.nodes.get(session.node_id)
         if not node:
-            # reinicia para segurança
             session.node_id = self.flow.start
             node = self.flow.nodes[session.node_id]
 
@@ -281,7 +283,6 @@ class Engine:
                     continue
 
             elif kind == "question":
-                # Se recebemos uma resposta agora, salvar e avançar
                 if incoming_text is not None:
                     save_as = data.get("save_as")
                     if save_as:
@@ -298,12 +299,9 @@ class Engine:
             elif kind == "choice":
                 mapped = None
                 if incoming_text is not None:
-                    # 3.1: casa pelo valor exato de uma opção
                     for opt in data.get("options", []):
                         if str(incoming_text).strip().lower() == str(opt.get("value","")).strip().lower():
-                            mapped = opt.get("next")
-                            break
-                    # 3.2: se não casou por value, tenta por intent
+                            mapped = opt.get("next"); break
                     if not mapped:
                         intent = detect_intent(incoming_text, self.flow.intents)
                         if intent:
@@ -314,52 +312,13 @@ class Engine:
                     progressed = True
                     incoming_text = None
                     continue
-                # Sem entrada ou não casou -> apresenta botões
                 text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
                 opts = [(opt.get("label"), opt.get("value")) for opt in data.get("options", [])]
                 out_messages.append({"type": "buttons", "text": text, "options": opts})
 
             elif kind == "action":
-                act = (data.get("action") or "").lower()
-
-                # --- NOVO: gate de horário comercial ---
-                if act == "business_hours_gate":
-                    tzname = data.get("timezone") or "America/Sao_Paulo"
-                    in_hours_next = data.get("in_hours_next") or data.get("next")
-                    off_hours_next = data.get("off_hours_next") or data.get("fallback_next") or data.get("on_error_next")
-
-                    tz = ZoneInfo(tzname) if ZoneInfo else timezone(timedelta(hours=-3))
-                    now = datetime.now(tz)
-
-                    def in_hours(dt: datetime) -> bool:
-                        w = dt.weekday()  # 0=Mon ... 6=Sun
-                        t = dt.time()
-                        if w in (0,1,2,3,4):  # seg-sex
-                            return dtime(8,0) <= t <= dtime(20,0)
-                        if w == 5:  # sábado
-                            return dtime(8,0) <= t <= dtime(14,0)
-                        return False  # domingo
-
-                    session.node_id = in_hours_next if in_hours(now) else off_hours_next
-                    node = self.flow.nodes[session.node_id]
-                    progressed = True
-                    continue
-
-                # --- NOVO: pequeno atraso para permitir múltiplas mensagens ---
-                if act == "delay":
-                    sec = int(data.get("seconds") or 10)
-                    try:
-                        time.sleep(max(0, min(sec, 30)))  # limita a 30s
-                    except Exception:
-                        pass
-                    next_id = data.get("next")
-                    if next_id:
-                        session.node_id = next_id
-                        node = self.flow.nodes[next_id]
-                        progressed = True
-                        continue
-
-                # --- já existente: webhook arbitrário ---
+                act = data.get("action")
+                # --- call_webhook ---
                 if act == "call_webhook":
                     url = render_text(data.get("url", ""), {"ctx": session.ctx, "contact": session.contact})
                     method = (data.get("method") or "GET").upper()
@@ -381,6 +340,43 @@ class Engine:
                     progressed = True
                     continue
 
+                # --- delay (bloqueia até N segundos e segue) ---
+                elif act == "delay":
+                    # só faz sentido após uma resposta do usuário; se cair aqui sem ter havido
+                    # resposta (incoming_text is None), apenas segue para não travar o fluxo
+                    seconds = int(data.get("seconds") or 0)
+                    seconds = max(0, min(seconds, 30))  # safety cap
+                    if seconds > 0:
+                        time.sleep(seconds)
+                    session.node_id = data.get("next") or session.node_id
+                    node = self.flow.nodes[session.node_id]
+                    progressed = True
+                    continue
+
+                # --- business_hours_gate ---
+                elif act == "business_hours_gate":
+                    tz = data.get("timezone") or "America/Sao_Paulo"
+                    now_dt = _now_in_tz(tz)
+                    in_hours = _is_business_hours(now_dt)
+                    session.ctx["business_hours"] = bool(in_hours)
+                    if in_hours and data.get("in_hours_next"):
+                        session.node_id = data["in_hours_next"]
+                    elif not in_hours and data.get("off_hours_next"):
+                        session.node_id = data["off_hours_next"]
+                    elif data.get("next"):
+                        session.node_id = data["next"]
+                    # se nada configurado, fica no mesmo nó (evita crash)
+                    node = self.flow.nodes.get(session.node_id, node)
+                    progressed = True
+                    continue
+
+                else:
+                    # ação desconhecida: apenas segue fallback/next se houver
+                    session.node_id = data.get("fallback_next") or data.get("next") or session.node_id
+                    node = self.flow.nodes.get(session.node_id, node)
+                    progressed = True
+                    continue
+
             elif kind == "handoff":
                 text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
                 out_messages.append({"type": "text", "text": text})
@@ -393,17 +389,15 @@ class Engine:
                     continue
 
             elif kind == "end":
-                # Fim do fluxo. Mantém sessão para contexto, mas não envia nada a mais.
+                # Nó terminal: não envia nada automaticamente.
                 pass
 
             else:
-                # tipo desconhecido -> encerra com handoff
                 out_messages.append({"type": "text", "text": "Desculpe, tive um imprevisto técnico. Vou te redirecionar a um atendente."})
                 session.assigned = "human"
                 break
 
         return session, out_messages
-
 
 def _extract_msg_id(resp_json: Dict[str, Any]) -> Optional[str]:
     try:
@@ -444,13 +438,11 @@ def _save_outgoing_to_avulsas(
                 ),
             )
     except Exception:
-        # não derruba o fluxo se o log falhar
         pass
 
 # ==========================
-# Função plug-and-play para o webhook
+# Webhook: entrada principal
 # ==========================
-
 def handle_incoming(
     wa_phone: str,
     incoming_text: Optional[str],
@@ -464,12 +456,25 @@ def handle_incoming(
 
     flow = Flow.load_from_file(flow_file)
     session = Store.get_session(wa_phone)
+
     if not session:
-        session = Session(wa_phone=wa_phone, flow_id=flow.flow_id, node_id=flow.start, ctx={}, contact=contact or {}, assigned="virtual")
+        session = Session(
+            wa_phone=wa_phone,
+            flow_id=flow.flow_id,
+            node_id=flow.start,
+            ctx={},
+            contact=contact or {},
+            assigned="virtual"
+        )
     else:
+        # se a sessão for de outro fluxo, reinicia no novo
         if session.flow_id != flow.flow_id:
             session.flow_id = flow.flow_id
             session.node_id = flow.start
+        # se parou em 'end', reinicia quando chegar nova mensagem
+        if session.node_id not in flow.nodes or flow.nodes[session.node_id].type == "end":
+            session.node_id = flow.start
+        # atualiza dados de contato se fornecido
         if contact:
             session.contact.update(contact)
 
