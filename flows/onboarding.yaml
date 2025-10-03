@@ -1,61 +1,51 @@
-flow_id: onboarding
-start: welcome
-
-intents:
-  boleto:
-    any: ["boleto", "2a via", "2ª via", "segunda via", "linha digitável"]
-  humano:
-    any: ["atendente", "humano", "suporte", "falar com alguém"]
+flow_id: simple_handoff
+start: hours_gate
 
 nodes:
+  # Verifica horário de atendimento e decide o próximo nó
+  hours_gate:
+    type: action
+    action: business_hours_gate
+    timezone: "America/Sao_Paulo"
+    in_hours_next: welcome
+    off_hours_next: off_hours_msg
+
+  # Saudação + pedido de resumo
   welcome:
     type: message
     text: |
-      Olá {{contact.nome or ""}} 👋 Sou o assistente virtual da ConnectZap.
-      Posso te ajudar com 2ª via de boleto, status, ou te encaminho a um atendente.
-    next: ask_name
+      Olá {{contact.nome or ""}} 👋 Sou o assistente virtual da ConnectZap e vou te ajudar no atendimento.
+      Antes de transferir, pode me mandar um breve resumo do que você precisa?
+    next: ask_summary
 
-  ask_name:
+  # Captura o resumo do cliente
+  ask_summary:
     type: question
-    text: "Como você prefere ser chamado(a)?"
-    save_as: name
-    next: ask_goal
+    text: "Pode me enviar um breve resumo?"
+    save_as: summary
+    next: delay_then_handoff
 
-  ask_goal:
-    type: choice
-    text: "Prazer, {{ctx.name}}! Como posso ajudar hoje?"
-    options:
-      - label: "2ª via de boleto"
-        value: boleto
-        next: boleto_action
-      - label: "Falar com atendente"
-        value: humano
-        next: handoff
-    intent_map:
-      boleto: boleto_action
-      humano: handoff
-    fallback_next: handoff
-
-  boleto_action:
+  # Aguarda ~10s (para permitir mensagens extras) e então faz handoff
+  delay_then_handoff:
     type: action
-    action: call_webhook
-    url: "https://seuservidor/api/boleto"
-    method: POST
-    body:
-      cpf: "{{contact.cpf}}"
-    on_success_next: send_boleto
-    on_error_next: handoff
+    action: delay
+    seconds: 10
+    next: handoff
 
-  send_boleto:
-    type: message
-    text: |
-      Pronto, {{ctx.name}}! 🧾 Aqui está seu boleto: {{ctx.boleto_url}}
-      Se precisar de mais alguma coisa, é só me dizer.
-    next: end
-
+  # Encaminha para humano
   handoff:
     type: handoff
-    text: "Ok! Vou te conectar com um atendente humano. Aguarde um instante."
+    text: "Ok, muito obrigado! Vou te conectar com um atendente humano. Aguarde um instante."
+    next: end
+
+  # Mensagem fora do horário
+  off_hours_msg:
+    type: message
+    text: |
+      Ops! Nosso horário de atendimento é de segunda a sexta, das 08h às 20h,
+      e aos sábados, das 08h às 14h.
+      Se puder, mande sua mensagem nesse período para um retorno mais rápido.
+      Se preferir, pode deixar um resumo agora e responderemos no próximo horário útil. 🙂
     next: end
 
   end:
