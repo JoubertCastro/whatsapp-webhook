@@ -13,6 +13,13 @@ import requests
 import yaml
 BASE_DIR = Path(__file__).resolve().parent
 
+from datetime import datetime, time as dtime, timezone, timedelta
+try:
+    from zoneinfo import ZoneInfo  # py>=3.9
+except ImportError:
+    ZoneInfo = None
+
+
 # ==========================
 # Config via ambiente
 # ==========================
@@ -32,8 +39,6 @@ ALLOWED_WABA_IDS = set(filter(None, os.getenv("ALLOWED_WABA_IDS", "").split(",")
 # ==========================
 # Conexão Postgres
 # ==========================
-
-
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
@@ -224,9 +229,8 @@ def render_text(tpl: str, ctx: Dict[str, Any]) -> str:
     return re.sub(r"\{\{([^}]+)\}\}", repl, tpl)
 
 
-
 # ==========================
-# Intents simples (palavras‑chave/regex)
+# Intents simples (palavras-chave/regex)
 # ==========================
 
 def detect_intent(text: str, intents: Dict[str, Any]) -> Optional[str]:
@@ -314,14 +318,52 @@ class Engine:
                 text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
                 opts = [(opt.get("label"), opt.get("value")) for opt in data.get("options", [])]
                 out_messages.append({"type": "buttons", "text": text, "options": opts})
-                # se o usuário enviar texto livre, tratar na próxima chamada
 
             elif kind == "action":
-                if data.get("action") == "call_webhook":
+                act = (data.get("action") or "").lower()
+
+                # --- NOVO: gate de horário comercial ---
+                if act == "business_hours_gate":
+                    tzname = data.get("timezone") or "America/Sao_Paulo"
+                    in_hours_next = data.get("in_hours_next") or data.get("next")
+                    off_hours_next = data.get("off_hours_next") or data.get("fallback_next") or data.get("on_error_next")
+
+                    tz = ZoneInfo(tzname) if ZoneInfo else timezone(timedelta(hours=-3))
+                    now = datetime.now(tz)
+
+                    def in_hours(dt: datetime) -> bool:
+                        w = dt.weekday()  # 0=Mon ... 6=Sun
+                        t = dt.time()
+                        if w in (0,1,2,3,4):  # seg-sex
+                            return dtime(8,0) <= t <= dtime(20,0)
+                        if w == 5:  # sábado
+                            return dtime(8,0) <= t <= dtime(14,0)
+                        return False  # domingo
+
+                    session.node_id = in_hours_next if in_hours(now) else off_hours_next
+                    node = self.flow.nodes[session.node_id]
+                    progressed = True
+                    continue
+
+                # --- NOVO: pequeno atraso para permitir múltiplas mensagens ---
+                if act == "delay":
+                    sec = int(data.get("seconds") or 10)
+                    try:
+                        time.sleep(max(0, min(sec, 30)))  # limita a 30s
+                    except Exception:
+                        pass
+                    next_id = data.get("next")
+                    if next_id:
+                        session.node_id = next_id
+                        node = self.flow.nodes[next_id]
+                        progressed = True
+                        continue
+
+                # --- já existente: webhook arbitrário ---
+                if act == "call_webhook":
                     url = render_text(data.get("url", ""), {"ctx": session.ctx, "contact": session.contact})
                     method = (data.get("method") or "GET").upper()
                     body = data.get("body") or {}
-                    # renderiza campos do body
                     rendered_body = json.loads(render_text(json.dumps(body), {"ctx": session.ctx, "contact": session.contact}))
                     try:
                         if method == "POST":
@@ -329,7 +371,6 @@ class Engine:
                         else:
                             resp = requests.get(url, params=rendered_body, timeout=30)
                         payload = resp.json() if "application/json" in resp.headers.get("Content-Type", "") else {"text": resp.text}
-                        # mescla em ctx
                         for k, v in payload.items():
                             session.ctx[k] = v
                         next_id = data.get("on_success_next") or data.get("next")
@@ -362,6 +403,7 @@ class Engine:
                 break
 
         return session, out_messages
+
 
 def _extract_msg_id(resp_json: Dict[str, Any]) -> Optional[str]:
     try:
