@@ -2,7 +2,6 @@ flow_id: simple_handoff
 start: hours_gate
 
 nodes:
-  # Verifica horário de atendimento e decide o próximo nó
   hours_gate:
     type: action
     action: business_hours_gate
@@ -10,7 +9,6 @@ nodes:
     in_hours_next: welcome
     off_hours_next: off_hours_msg
 
-  # Saudação + pedido de resumo
   welcome:
     type: message
     text: |
@@ -18,27 +16,23 @@ nodes:
       Antes de transferir, pode me mandar um breve resumo do que você precisa?
     next: ask_summary
 
-  # Captura o resumo do cliente
   ask_summary:
     type: question
-    text: "Pode me enviar um breve resumo?"
+    # sem 'text' para não enviar segunda mensagem
     save_as: summary
     next: delay_then_handoff
 
-  # Aguarda ~10s (para permitir mensagens extras) e então faz handoff
   delay_then_handoff:
     type: action
     action: delay
     seconds: 10
     next: handoff
 
-  # Encaminha para humano
   handoff:
     type: handoff
     text: "Ok, muito obrigado! Vou te conectar com um atendente humano. Aguarde um instante."
     next: end
 
-  # Mensagem fora do horário
   off_hours_msg:
     type: message
     text: |
