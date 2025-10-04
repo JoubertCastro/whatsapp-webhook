@@ -211,6 +211,23 @@ def salvar_status(msg_id, recipient_id, status, raw, timestamp=None,
     cur.close()
     conn.close()
 
+
+def conversa_humana_ativa(telefone: str, phone_id: str) -> bool:
+    """True se já existe conversa ativa para (telefone, phone_id)."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT 1
+              FROM conversas_em_andamento
+             WHERE telefone=%s
+               AND phone_id=%s
+               AND ended_at IS NULL
+             LIMIT 1
+        """, (telefone, phone_id))
+        return cur.fetchone() is not None
+    finally:
+        cur.close(); conn.close()
+        
 # =========================
 # Webhook Meta
 # =========================
@@ -238,7 +255,7 @@ def webhook():
         messages = value.get("messages", [])
         statuses = value.get("statuses", [])
 
-        # 1) Salva mensagens recebidas
+        # 1) Salva mensagens recebidas (como já estava)
         for msg in messages:
             remetente = msg.get("from", "desconhecido")
             msg_id = msg.get("id")
@@ -273,6 +290,29 @@ def webhook():
                 remetente = msg.get("from", "desconhecido")
                 tipo = msg.get("type")
 
+                # ⚠️ NOVO: se há conversa humana ativa, não chama o bot
+                if conversa_humana_ativa(remetente, phone_number_id):
+                    # Apenas ignora para o bot (o humano segue no atendimento)
+                    continue
+
+                # (opcional) SEGUNDA BARREIRA: se a sessão do bot já está marcada como 'human', não responde
+                try:
+                    conn = get_conn(); cur = conn.cursor()
+                    cur.execute("""
+                        SELECT assigned FROM bot_sessions
+                         WHERE wa_phone=%s
+                         ORDER BY updated_at DESC
+                         LIMIT 1
+                    """, (remetente,))
+                    row = cur.fetchone()
+                finally:
+                    cur.close(); conn.close()
+
+                if row and (row.get("assigned") or "") == "human":
+                    # o próprio fluxo já fez handoff -> o bot fica quieto
+                    continue
+
+                # Se chegou aqui, o bot pode responder
                 texto = None
                 if tipo == "text":
                     texto = msg.get("text", {}).get("body")
@@ -290,16 +330,15 @@ def webhook():
                 }
 
                 handle_incoming(
-                    wa_phone=remetente,
-                    incoming_text=texto,
+                    remetente,
+                    texto,
                     flow_file=flow_file,
                     contact=contact,
-                    phone_id=phone_number_id,   # dinâmico
-                    waba_id=waba_id             # dinâmico
-                    # sem token -> usa WHATSAPP_TOKEN global
+                    phone_id=phone_number_id,  # dinâmico
+                    waba_id=waba_id            # dinâmico
                 )
 
-        # 3) Status
+        # 3) Status (como já estava)
         for st in statuses:
             salvar_status(
                 st.get("id"), st.get("recipient_id"), st.get("status"), st,
@@ -308,7 +347,6 @@ def webhook():
 
     except Exception as e:
         print("❌ Erro ao processar webhook:", e)
-
 
     return "EVENT_RECEIVED", 200
 
