@@ -134,7 +134,7 @@ def init_db():
         );
     """)
 
-    # --- Agentes e Fila
+    # --- Agentes e Fila (online)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS agentes (
             codigo_do_agente INT PRIMARY KEY,
@@ -157,6 +157,55 @@ def init_db():
     cur.execute("""
         CREATE INDEX IF NOT EXISTS ix_fila_carteira_ord
         ON fila_de_atendimento (carteira, data_hora ASC);
+    """)
+
+    # --- Conversas humanas em andamento (para filtro da fila pendente e webhook)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS conversas_em_andamento (
+            id SERIAL PRIMARY KEY,
+            telefone TEXT NOT NULL,
+            phone_id TEXT NOT NULL,
+            started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            ended_at TIMESTAMP NULL
+        );
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS ix_conversas_lookup
+        ON conversas_em_andamento (telefone, phone_id, ended_at);
+    """)
+
+    # --- Sessões do bot (consulta leve no webhook)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bot_sessions (
+            id SERIAL PRIMARY KEY,
+            wa_phone TEXT,
+            assigned TEXT,
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
+    """)
+
+    # --- Fila de contatos "não atribuídos" (pré-conversa humana)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS fila_contatos (
+            id SERIAL PRIMARY KEY,
+            telefone TEXT NOT NULL,
+            carteira TEXT NOT NULL,
+            phone_id TEXT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            assigned BOOLEAN NOT NULL DEFAULT FALSE
+        );
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_fila_contatos_carteira ON fila_contatos(carteira);")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_fila_contatos_lookup ON fila_contatos(telefone, phone_id, assigned);")
+
+    # --- Configuração de logout automático
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS logout_config (
+            id SMALLINT PRIMARY KEY DEFAULT 1,
+            enabled BOOLEAN NOT NULL DEFAULT FALSE,
+            time TEXT NOT NULL DEFAULT '18:00',      -- HH:MM
+            carteiras TEXT[] NOT NULL DEFAULT '{}'::TEXT[]
+        );
     """)
 
     conn.commit()
@@ -292,10 +341,9 @@ def webhook():
 
                 # ⚠️ NOVO: se há conversa humana ativa, não chama o bot
                 if conversa_humana_ativa(remetente, phone_number_id):
-                    # Apenas ignora para o bot (o humano segue no atendimento)
                     continue
 
-                # (opcional) SEGUNDA BARREIRA: se a sessão do bot já está marcada como 'human', não responde
+                # (opcional) SEGUNDA BARREIRA
                 try:
                     conn = get_conn(); cur = conn.cursor()
                     cur.execute("""
@@ -309,10 +357,8 @@ def webhook():
                     cur.close(); conn.close()
 
                 if row and (row.get("assigned") or "") == "human":
-                    # o próprio fluxo já fez handoff -> o bot fica quieto
                     continue
 
-                # Se chegou aqui, o bot pode responder
                 texto = None
                 if tipo == "text":
                     texto = msg.get("text", {}).get("body")
@@ -577,7 +623,7 @@ def put_agente(codigo: int):
         cur.close(); conn.close()
 
 # =========================
-# Fila de Atendimento
+# Fila de Atendimento (agentes online)
 # =========================
 @app.route("/api/fila/online", methods=["POST"])
 def fila_online():
@@ -597,7 +643,7 @@ def fila_online():
         if not cur.fetchone():
             return not_found("Agente não cadastrado")
 
-        # Tenta entrar na fila (sem estourar exceção)
+        # Tenta entrar na fila
         cur.execute("""
             INSERT INTO fila_de_atendimento (codigo_do_agente, carteira, data_hora)
             VALUES (%s, %s, NOW())
@@ -674,6 +720,70 @@ def fila_status():
     finally:
         cur.close(); conn.close()
 
+# =========================
+# Fila de contatos NÃO ATRIBUÍDOS (para os novos KPIs)
+# =========================
+def _pendentes_base_sql(agregado=False):
+    """
+    Monta SQL que considera:
+      - fila_contatos.assigned = false
+      - NÃO existe conversa humana ativa para o telefone/phone_id
+    """
+    if not agregado:
+        return """
+            SELECT fc.telefone, fc.carteira, fc.created_at
+              FROM fila_contatos fc
+         LEFT JOIN conversas_em_andamento cea
+                ON cea.telefone = fc.telefone
+               AND (fc.phone_id IS NULL OR cea.phone_id = fc.phone_id)
+               AND cea.ended_at IS NULL
+             WHERE fc.assigned = FALSE
+               AND cea.id IS NULL
+             ORDER BY fc.created_at ASC
+        """
+    else:
+        return """
+            SELECT fc.carteira, COUNT(*)::INT AS total
+              FROM fila_contatos fc
+         LEFT JOIN conversas_em_andamento cea
+                ON cea.telefone = fc.telefone
+               AND (fc.phone_id IS NULL OR cea.phone_id = fc.phone_id)
+               AND cea.ended_at IS NULL
+             WHERE fc.assigned = FALSE
+               AND cea.id IS NULL
+          GROUP BY fc.carteira
+          ORDER BY total DESC
+        """
+
+@app.route("/api/fila/pendentes", methods=["GET"])
+def fila_pendentes():
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(_pendentes_base_sql(agregado=False))
+        rows = cur.fetchall()
+        return jsonify(rows)  # [{telefone, carteira, created_at}]
+    except Exception as e:
+        print("❌ /api/fila/pendentes:", e)
+        return jsonify([])  # front tem fallback de UI
+    finally:
+        cur.close(); conn.close()
+
+@app.route("/api/fila/pendentes_por_carteira", methods=["GET"])
+def fila_pendentes_por_carteira():
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(_pendentes_base_sql(agregado=True))
+        rows = cur.fetchall()
+        return jsonify(rows)  # [{carteira, total}]
+    except Exception as e:
+        print("❌ /api/fila/pendentes_por_carteira:", e)
+        return jsonify([])  # front sabe lidar
+    finally:
+        cur.close(); conn.close()
+
+# =========================
+# Envios (CRUD + ações)
+# =========================
 @app.route("/api/envios", methods=["POST"])
 def criar_envio():
     data = request.get_json(silent=True) or {}
@@ -702,9 +812,9 @@ def criar_envio():
             nome, grupo, modo, agendamento,
             intervalo_msg, tamanho_lote, intervalo_lote,
             json.dumps(data.get("template")),
-            data.get("token"),    
-            data.get("phone_id"), 
-            data.get("waba_id")   
+            data.get("token"),
+            data.get("phone_id"),
+            data.get("waba_id")
         ))
 
         envio_id = cur.fetchone()["id"]
@@ -714,7 +824,6 @@ def criar_envio():
                 INSERT INTO envios_analitico (envio_id, nome_disparo, grupo_trabalho, telefone, conteudo, status)
                 VALUES (%s,%s,%s,%s,%s,'pendente')
             """, (envio_id, nome, grupo, c.get("telefone"), c.get("conteudo")))
-
 
         conn.commit()
         return jsonify({"ok": True, "id": envio_id})
@@ -726,28 +835,16 @@ def criar_envio():
         cur.close()
         conn.close()
 
-# =========================
-# Agendamentos (CRUD + ações)
-# =========================
-
 def _row_to_iso(dt):
-    # Converte datetime -> string ISO (mantém 'None' como None)
     return dt.isoformat() if dt else None
 
 @app.route("/api/envios", methods=["GET"])
 def listar_envios():
-    """
-    Lista envios (imediatos e agendados) com agregados de status do analítico.
-    Aceita filtros opcionais via querystring:
-      - modo_envio=imediato|agendar
-      - status=pendente|pausado|cancelado|enviado|erro (filtra pelo analítico predominante)
-    """
     modo = request.args.get("modo_envio")
     status_filtro = request.args.get("status")
 
     conn = get_conn(); cur = conn.cursor()
     try:
-        # Agregados por envio
         cur.execute("""
             SELECT
               e.id,
@@ -772,14 +869,7 @@ def listar_envios():
         """)
         rows = cur.fetchall()
 
-        # Filtragem em memória (simples) se usuário pediu
         def computa_status_geral(r):
-            # Deriva um "status geral" do envio:
-            #  - se cancelados == total_pendentes+pausados (todos remanescentes cancelados) -> 'cancelado'
-            #  - se enviados == total e erros == 0 -> 'concluido'
-            #  - se enviados > 0 e pendentes+pausados > 0 -> 'em_andamento'
-            #  - se pausados > 0 e pendentes == 0 -> 'pausado'
-            #  - se pendentes > 0 -> 'agendado' (ou 'pendente')
             tot = r["total"] or 0
             pen, pau, can, env, err = r["pendentes"], r["pausados"], r["cancelados"], r["enviados"], r["erros"]
             if tot > 0 and env == tot and err == 0:
@@ -792,7 +882,6 @@ def listar_envios():
                 return "pausado"
             if pen > 0:
                 return "agendado"
-            # fallback
             return "imediato" if r["modo_envio"] == "imediato" else "agendado"
 
         resp = []
@@ -830,10 +919,8 @@ def listar_envios():
     finally:
         cur.close(); conn.close()
 
-
 @app.route("/api/envios/<int:envio_id>", methods=["GET"])
 def obter_envio(envio_id: int):
-    """Retorna o envio e, opcionalmente, contatos (paginado). Use ?with_contatos=1&status=pendente&limit=100&offset=0"""
     with_contatos = request.args.get("with_contatos") == "1"
     status_f = request.args.get("status")
     limit = int(request.args.get("limit") or 200)
@@ -888,15 +975,8 @@ def obter_envio(envio_id: int):
     finally:
         cur.close(); conn.close()
 
-
 @app.route("/api/envios/<int:envio_id>", methods=["PUT"])
 def editar_envio(envio_id: int):
-    """
-    Edita campos do envio. Corpo JSON pode conter qualquer um dos campos:
-      - nome_disparo, grupo_trabalho, modo_envio, data_hora_agendamento,
-        intervalo_msg, tamanho_lote, intervalo_lote, template, token, phone_id, waba_id
-    Obs.: edição não mexe nos contatos já cadastrados (envios_analitico).
-    """
     data = request.get_json(silent=True) or {}
     allowed = ["nome_disparo","grupo_trabalho","modo_envio","data_hora_agendamento",
                "intervalo_msg","tamanho_lote","intervalo_lote","template","token","phone_id","waba_id"]
@@ -905,7 +985,6 @@ def editar_envio(envio_id: int):
     for k in allowed:
         if k in data:
             sets.append(f"{k}=%s")
-            # jsonb precisa de json.dumps
             if k == "template" and data[k] is not None and not isinstance(data[k], str):
                 params.append(json.dumps(data[k]))
             else:
@@ -930,10 +1009,8 @@ def editar_envio(envio_id: int):
     finally:
         cur.close(); conn.close()
 
-
 @app.route("/api/envios/<int:envio_id>", methods=["DELETE"])
 def excluir_envio(envio_id: int):
-    """Exclui o envio e seus contatos (CASCADE já configurado)."""
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute("DELETE FROM envios WHERE id=%s RETURNING id", (envio_id,))
@@ -949,13 +1026,8 @@ def excluir_envio(envio_id: int):
     finally:
         cur.close(); conn.close()
 
-
 @app.route("/api/envios/<int:envio_id>/pause", methods=["PATCH"])
 def pausar_envio(envio_id: int):
-    """
-    Pausa um envio trocando itens 'pendente' -> 'pausado' no analítico.
-    O worker só lê 'pendente', então isso efetivamente pausa.
-    """
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute("UPDATE envios_analitico SET status='pausado' WHERE envio_id=%s AND status='pendente' RETURNING id", (envio_id,))
@@ -969,10 +1041,8 @@ def pausar_envio(envio_id: int):
     finally:
         cur.close(); conn.close()
 
-
 @app.route("/api/envios/<int:envio_id>/resume", methods=["PATCH"])
 def retomar_envio(envio_id: int):
-    """Retoma um envio trocando 'pausado' -> 'pendente'."""
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute("UPDATE envios_analitico SET status='pendente' WHERE envio_id=%s AND status='pausado' RETURNING id", (envio_id,))
@@ -986,10 +1056,8 @@ def retomar_envio(envio_id: int):
     finally:
         cur.close(); conn.close()
 
-
 @app.route("/api/envios/<int:envio_id>/cancel", methods=["PATCH"])
 def cancelar_envio(envio_id: int):
-    """Cancela um envio trocando 'pendente'/'pausado' -> 'cancelado'."""
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute("""
@@ -1009,6 +1077,78 @@ def cancelar_envio(envio_id: int):
     finally:
         cur.close(); conn.close()
 
+# =========================
+# Logout automático (novos endpoints)
+# =========================
+@app.route("/api/supervisao/logout-config", methods=["GET"])
+def get_logout_config():
+    """Retorna apenas o objeto de configuração (sem wrapper ok), como o front espera."""
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT enabled, time, carteiras FROM logout_config WHERE id=1")
+        row = cur.fetchone()
+        if not row:
+            # default
+            return jsonify({"enabled": False, "time": "18:00", "carteiras": []})
+        return jsonify({"enabled": bool(row["enabled"]), "time": row["time"], "carteiras": row["carteiras"] or []})
+    except Exception as e:
+        print("❌ /api/supervisao/logout-config [GET]:", e)
+        return jsonify({"enabled": False, "time": "18:00", "carteiras": []})
+    finally:
+        cur.close(); conn.close()
+
+@app.route("/api/supervisao/logout-config", methods=["PUT"])
+def put_logout_config():
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled", False))
+    time_str = (data.get("time") or "18:00").strip()[:5]
+    carteiras = data.get("carteiras") or []
+
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO logout_config (id, enabled, time, carteiras)
+            VALUES (1, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+               enabled = EXCLUDED.enabled,
+               time = EXCLUDED.time,
+               carteiras = EXCLUDED.carteiras
+        """, (enabled, time_str, carteiras))
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        print("❌ /api/supervisao/logout-config [PUT]:", e)
+        return jsonify({"ok": False, "erro": "erro ao salvar config"}), 500
+    finally:
+        cur.close(); conn.close()
+
+@app.route("/api/fila/forcar_logout", methods=["POST"])
+def forcar_logout():
+    """
+    Desloga (remove da fila_de_atendimento) todos os agentes das carteiras informadas.
+    Body: { carteiras: string[] }
+    """
+    data = request.get_json(silent=True) or {}
+    carteiras = data.get("carteiras") or []
+    if not isinstance(carteiras, list) or len(carteiras) == 0:
+        return bad_request("Informe ao menos uma carteira")
+
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            DELETE FROM fila_de_atendimento
+             WHERE carteira = ANY(%s)
+        """, (carteiras,))
+        afetados = cur.rowcount
+        conn.commit()
+        return jsonify({"ok": True, "afetados": afetados})
+    except Exception as e:
+        conn.rollback()
+        print("❌ /api/fila/forcar_logout [POST]:", e)
+        return jsonify({"ok": False, "erro": "erro ao forçar logout"}), 500
+    finally:
+        cur.close(); conn.close()
 
 # =========================
 # Run
