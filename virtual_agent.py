@@ -11,6 +11,13 @@ import psycopg2
 import psycopg2.extras
 import requests
 import yaml
+
+from datetime import datetime, time as dtime, timezone, timedelta
+try:
+    from zoneinfo import ZoneInfo  # py>=3.9
+except ImportError:
+    ZoneInfo = None
+
 BASE_DIR = Path(__file__).resolve().parent
 
 # ==========================
@@ -27,22 +34,17 @@ WABA_ID = os.getenv("WABA_ID", "")
 
 # Restrição opcional por conta/phone_id (se definido, o webhook só processa esses IDs)
 ALLOWED_PHONE_IDS = set(filter(None, os.getenv("ALLOWED_PHONE_IDS", "").split(",")))  # ex: "732661079928516"
-ALLOWED_WABA_IDS = set(filter(None, os.getenv("ALLOWED_WABA_IDS", "").split(",")))    # ex: "1910445533050310" (nem sempre vem no webhook)
+ALLOWED_WABA_IDS = set(filter(None, os.getenv("ALLOWED_WABA_IDS", "").split(",")))    # ex: "1910445533050310"
 
 # ==========================
 # Conexão Postgres
 # ==========================
-
-
-
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 # ==========================
 # Auxiliares WhatsApp API
 # ==========================
-
-# --- envio de texto ---
 def send_wa_text(to: str, body: str, phone_id: Optional[str] = None, token: Optional[str] = None) -> Dict[str, Any]:
     pid = phone_id or PHONE_ID
     tok = token or WHATSAPP_TOKEN
@@ -65,7 +67,6 @@ def send_wa_text(to: str, body: str, phone_id: Optional[str] = None, token: Opti
     finally:
         r.close()
 
-# --- envio de botões ---
 def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]], phone_id: Optional[str] = None, token: Optional[str] = None) -> Dict[str, Any]:
     pid = phone_id or PHONE_ID
     tok = token or WHATSAPP_TOKEN
@@ -96,11 +97,9 @@ def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]], phone_id
     finally:
         r.close()
 
-
 # ==========================
 # Motor de fluxo
 # ==========================
-
 @dataclass
 class FlowNode:
     id: str
@@ -126,11 +125,9 @@ class Flow:
             spec = yaml.safe_load(f)
         return Flow(spec)
 
-
 # ==========================
 # Sessão e armazenamento
 # ==========================
-
 @dataclass
 class Session:
     wa_phone: str
@@ -139,7 +136,6 @@ class Session:
     ctx: Dict[str, Any] = field(default_factory=dict)
     contact: Dict[str, Any] = field(default_factory=dict)
     assigned: str = "virtual"
-
 
 class Store:
     @staticmethod
@@ -197,15 +193,12 @@ class Store:
         except Exception:
             pass
 
-
 # ==========================
-# Render de templates simples
+# Helpers de template
 # ==========================
-
 def render_text(tpl: str, ctx: Dict[str, Any]) -> str:
     def repl(m: re.Match) -> str:
         expr = m.group(1).strip()
-        # suporte a fallback: foo.bar or "alguma coisa"
         fallback = ""
         if " or " in expr:
             left, right = expr.split(" or ", 1)
@@ -213,7 +206,6 @@ def render_text(tpl: str, ctx: Dict[str, Any]) -> str:
             mfb = re.match(r'^[\'"](.*?)[\'"]$', right.strip())
             if mfb:
                 fallback = mfb.group(1)
-        # resolve path com pontos
         parts = expr.split(".")
         val: Any = ctx
         for p in parts:
@@ -223,12 +215,195 @@ def render_text(tpl: str, ctx: Dict[str, Any]) -> str:
         return str(val) if val is not None else fallback
     return re.sub(r"\{\{([^}]+)\}\}", repl, tpl)
 
+# ==========================
+# Regras de horário comercial
+# ==========================
+def _now_in_tz(tz_name: str) -> datetime:
+    if ZoneInfo:
+        return datetime.now(ZoneInfo(tz_name))
+    # fallback: assume UTC-3
+    return datetime.now(timezone.utc) - timedelta(hours=3)
 
+def _is_business_hours(dt: datetime) -> bool:
+    # Segunda=0 ... Domingo=6
+    wd = dt.weekday()
+    h, m = dt.hour, dt.minute
+    t = dtime(h, m)
+    if wd in (0, 1, 2, 3, 4):  # seg-sex 08:00-20:00
+        return dtime(8, 0) <= t < dtime(20, 0)
+    if wd == 5:  # sábado 08:00-14:00
+        return dtime(8, 0) <= t < dtime(14, 0)
+    return False  # domingo fechado
 
 # ==========================
-# Intents simples (palavras‑chave/regex)
+# Execução de nó
 # ==========================
+class Engine:
+    def __init__(self, flow: Flow):
+        self.flow = flow
 
+    def step(self, session: Session, incoming_text: Optional[str]) -> Tuple[Session, List[Dict[str, Any]]]:
+        out_messages: List[Dict[str, Any]] = []
+
+        # segurança: se node inválido ou 'end', reinicia no start
+        node = self.flow.nodes.get(session.node_id)
+        if not node or node.type == "end":
+            session.node_id = self.flow.start
+            node = self.flow.nodes[session.node_id]
+            session.ctx.pop("_awaiting_question", None)
+
+        progressed = True
+        while progressed:
+            progressed = False
+            kind = node.type
+            data = node.data
+
+            if kind == "message":
+                text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
+                if text:
+                    out_messages.append({"type": "text", "text": text})
+                next_id = data.get("next")
+                if next_id:
+                    session.node_id = next_id
+                    node = self.flow.nodes[next_id]
+                    progressed = True
+                    # Nunca trate o incoming atual como resposta da pergunta recém-enviada
+                    continue
+
+            elif kind == "question":
+                awaiting = session.ctx.get("_awaiting_question")
+
+                # Já perguntamos antes e agora chegou a resposta
+                if incoming_text is not None and awaiting == node.id:
+                    save_as = data.get("save_as")
+                    if save_as:
+                        session.ctx[save_as] = incoming_text.strip()[:120]
+                    session.ctx.pop("_awaiting_question", None)
+                    session.node_id = data.get("next")
+                    node = self.flow.nodes[session.node_id]
+                    progressed = True
+                    incoming_text = None  # consumiu
+                    continue
+
+                # Ainda não perguntamos (neste node): envia pergunta (se houver texto) e marca aguardando
+                q_text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
+                if q_text:  # só envia se houver conteúdo
+                    out_messages.append({"type": "text", "text": q_text})
+                session.ctx["_awaiting_question"] = node.id
+                break  # espera próxima mensagem do cliente
+
+            elif kind == "choice":
+                mapped = None
+                if incoming_text is not None:
+                    for opt in data.get("options", []):
+                        if str(incoming_text).strip().lower() == str(opt.get("value","")).strip().lower():
+                            mapped = opt.get("next"); break
+                    if not mapped:
+                        intent = detect_intent(incoming_text, self.flow.intents)
+                        if intent:
+                            mapped = data.get("intent_map", {}).get(intent)
+                if mapped:
+                    session.node_id = mapped
+                    node = self.flow.nodes[session.node_id]
+                    progressed = True
+                    incoming_text = None
+                    session.ctx.pop("_awaiting_question", None)
+                    continue
+
+                txt = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
+                opts = [(opt.get("label"), opt.get("value")) for opt in data.get("options", [])]
+                out_messages.append({"type": "buttons", "text": txt, "options": opts})
+                break  # aguarda ação do usuário
+
+            elif kind == "action":
+                act = data.get("action")
+
+                if act == "call_webhook":
+                    url = render_text(data.get("url", ""), {"ctx": session.ctx, "contact": session.contact})
+                    method = (data.get("method") or "GET").upper()
+                    body = data.get("body") or {}
+                    rendered_body = json.loads(render_text(json.dumps(body), {"ctx": session.ctx, "contact": session.contact}))
+                    try:
+                        if method == "POST":
+                            resp = requests.post(url, json=rendered_body, timeout=30)
+                        else:
+                            resp = requests.get(url, params=rendered_body, timeout=30)
+                        payload = resp.json() if "application/json" in resp.headers.get("Content-Type", "") else {"text": resp.text}
+                        for k, v in payload.items():
+                            session.ctx[k] = v
+                        next_id = data.get("on_success_next") or data.get("next")
+                        session.node_id = next_id
+                    except Exception:
+                        session.node_id = data.get("on_error_next") or data.get("fallback_next") or session.node_id
+                    node = self.flow.nodes[session.node_id]
+                    progressed = True
+                    session.ctx.pop("_awaiting_question", None)
+                    continue
+
+                elif act == "delay":
+                    seconds = int(data.get("seconds") or 0)
+                    seconds = max(0, min(seconds, 30))  # sanidade
+                    if seconds > 0:
+                        time.sleep(seconds)
+                    session.node_id = data.get("next") or session.node_id
+                    node = self.flow.nodes[session.node_id]
+                    progressed = True
+                    session.ctx.pop("_awaiting_question", None)
+                    continue
+
+                elif act == "business_hours_gate":
+                    tz = data.get("timezone") or "America/Sao_Paulo"
+                    now_dt = _now_in_tz(tz)
+                    in_hours = _is_business_hours(now_dt)
+                    session.ctx["business_hours"] = bool(in_hours)
+                    if in_hours and data.get("in_hours_next"):
+                        session.node_id = data["in_hours_next"]
+                    elif not in_hours and data.get("off_hours_next"):
+                        session.node_id = data["off_hours_next"]
+                    elif data.get("next"):
+                        session.node_id = data["next"]
+                    node = self.flow.nodes.get(session.node_id, node)
+                    progressed = True
+                    session.ctx.pop("_awaiting_question", None)
+                    continue
+
+                else:
+                    # ação desconhecida → tenta next/fallback
+                    session.node_id = data.get("fallback_next") or data.get("next") or session.node_id
+                    node = self.flow.nodes.get(session.node_id, node)
+                    progressed = True
+                    session.ctx.pop("_awaiting_question", None)
+                    continue
+
+            elif kind == "handoff":
+                text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
+                if text:
+                    out_messages.append({"type": "text", "text": text})
+                session.assigned = "human"
+                next_id = data.get("next")
+                if next_id:
+                    session.node_id = next_id
+                    node = self.flow.nodes[next_id]
+                    progressed = True
+                    session.ctx.pop("_awaiting_question", None)
+                    continue
+                break
+
+            elif kind == "end":
+                session.ctx.pop("_awaiting_question", None)
+                break
+
+            else:
+                out_messages.append({"type": "text", "text": "Desculpe, tive um imprevisto técnico. Vou te redirecionar a um atendente."})
+                session.assigned = "human"
+                session.ctx.pop("_awaiting_question", None)
+                break
+
+        return session, out_messages
+
+# ==========================
+# Intents (se usar choice)
+# ==========================
 def detect_intent(text: str, intents: Dict[str, Any]) -> Optional[str]:
     t = (text or "").lower()
     for name, spec in intents.items():
@@ -240,129 +415,9 @@ def detect_intent(text: str, intents: Dict[str, Any]) -> Optional[str]:
             return name
     return None
 
-
 # ==========================
-# Execução de nó
+# Persistência em mensagens_avulsas
 # ==========================
-
-class Engine:
-    def __init__(self, flow: Flow):
-        self.flow = flow
-
-    def step(self, session: Session, incoming_text: Optional[str]) -> Tuple[Session, List[Dict[str, Any]]]:
-        """Processa a entrada do usuário e retorna mensagens de saída.
-        Pode atravessar múltiplos nós automaticamente (message->next, etc.).
-        """
-        out_messages: List[Dict[str, Any]] = []
-        node = self.flow.nodes.get(session.node_id)
-        if not node:
-            # reinicia para segurança
-            session.node_id = self.flow.start
-            node = self.flow.nodes[session.node_id]
-
-        progressed = True
-        while progressed:
-            progressed = False
-            kind = node.type
-            data = node.data
-
-            if kind == "message":
-                text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
-                out_messages.append({"type": "text", "text": text})
-                next_id = data.get("next")
-                if next_id:
-                    session.node_id = next_id
-                    node = self.flow.nodes[next_id]
-                    progressed = True
-                    continue
-
-            elif kind == "question":
-                # Se recebemos uma resposta agora, salvar e avançar
-                if incoming_text is not None:
-                    save_as = data.get("save_as")
-                    if save_as:
-                        session.ctx[save_as] = incoming_text.strip()[:120]
-                    session.node_id = data.get("next")
-                    node = self.flow.nodes[session.node_id]
-                    progressed = True
-                    incoming_text = None  # consumiu a entrada
-                    continue
-                else:
-                    text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
-                    out_messages.append({"type": "text", "text": text})
-
-            elif kind == "choice":
-                mapped = None
-                if incoming_text is not None:
-                    # 3.1: casa pelo valor exato de uma opção
-                    for opt in data.get("options", []):
-                        if str(incoming_text).strip().lower() == str(opt.get("value","")).strip().lower():
-                            mapped = opt.get("next")
-                            break
-                    # 3.2: se não casou por value, tenta por intent
-                    if not mapped:
-                        intent = detect_intent(incoming_text, self.flow.intents)
-                        if intent:
-                            mapped = data.get("intent_map", {}).get(intent)
-                if mapped:
-                    session.node_id = mapped
-                    node = self.flow.nodes[session.node_id]
-                    progressed = True
-                    incoming_text = None
-                    continue
-                # Sem entrada ou não casou -> apresenta botões
-                text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
-                opts = [(opt.get("label"), opt.get("value")) for opt in data.get("options", [])]
-                out_messages.append({"type": "buttons", "text": text, "options": opts})
-                # se o usuário enviar texto livre, tratar na próxima chamada
-
-            elif kind == "action":
-                if data.get("action") == "call_webhook":
-                    url = render_text(data.get("url", ""), {"ctx": session.ctx, "contact": session.contact})
-                    method = (data.get("method") or "GET").upper()
-                    body = data.get("body") or {}
-                    # renderiza campos do body
-                    rendered_body = json.loads(render_text(json.dumps(body), {"ctx": session.ctx, "contact": session.contact}))
-                    try:
-                        if method == "POST":
-                            resp = requests.post(url, json=rendered_body, timeout=30)
-                        else:
-                            resp = requests.get(url, params=rendered_body, timeout=30)
-                        payload = resp.json() if "application/json" in resp.headers.get("Content-Type", "") else {"text": resp.text}
-                        # mescla em ctx
-                        for k, v in payload.items():
-                            session.ctx[k] = v
-                        next_id = data.get("on_success_next") or data.get("next")
-                        session.node_id = next_id
-                    except Exception:
-                        session.node_id = data.get("on_error_next") or data.get("fallback_next") or session.node_id
-                    node = self.flow.nodes[session.node_id]
-                    progressed = True
-                    continue
-
-            elif kind == "handoff":
-                text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
-                out_messages.append({"type": "text", "text": text})
-                session.assigned = "human"
-                next_id = data.get("next")
-                if next_id:
-                    session.node_id = next_id
-                    node = self.flow.nodes[next_id]
-                    progressed = True
-                    continue
-
-            elif kind == "end":
-                # Fim do fluxo. Mantém sessão para contexto, mas não envia nada a mais.
-                pass
-
-            else:
-                # tipo desconhecido -> encerra com handoff
-                out_messages.append({"type": "text", "text": "Desculpe, tive um imprevisto técnico. Vou te redirecionar a um atendente."})
-                session.assigned = "human"
-                break
-
-        return session, out_messages
-
 def _extract_msg_id(resp_json: Dict[str, Any]) -> Optional[str]:
     try:
         msgs = resp_json.get("messages")
@@ -408,7 +463,6 @@ def _save_outgoing_to_avulsas(
 # ==========================
 # Função plug-and-play para o webhook
 # ==========================
-
 def handle_incoming(
     wa_phone: str,
     incoming_text: Optional[str],
@@ -423,11 +477,15 @@ def handle_incoming(
     flow = Flow.load_from_file(flow_file)
     session = Store.get_session(wa_phone)
     if not session:
-        session = Session(wa_phone=wa_phone, flow_id=flow.flow_id, node_id=flow.start, ctx={}, contact=contact or {}, assigned="virtual")
+        session = Session(
+            wa_phone=wa_phone, flow_id=flow.flow_id, node_id=flow.start,
+            ctx={}, contact=contact or {}, assigned="virtual"
+        )
     else:
         if session.flow_id != flow.flow_id:
             session.flow_id = flow.flow_id
             session.node_id = flow.start
+            session.ctx.pop("_awaiting_question", None)
         if contact:
             session.contact.update(contact)
 

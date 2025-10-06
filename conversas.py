@@ -6,7 +6,7 @@ import boto3
 from botocore.client import Config
 import base64
 import psycopg2.errors
-
+import re
 
 app = Flask(__name__)
 
@@ -962,11 +962,30 @@ def enviar_mensagem(telefone):
 
     return jsonify({"ok": True, "resposta": resposta_raw, "msg_id": retorno_msg_id or msg_id})
 
+def _normalize_remetente(p: str) -> str:
+    if not p: return ""
+    d = re.sub(r"\D", "", str(p))
+    if not d.startswith("55"):
+        d = "55" + d
+
+    head, rest = d[:4], d[4:]
+    if len(rest) == 9 and rest.startswith("9"):
+        d = head + rest[1:]
+    else:
+        d = head + rest
+    return d
+
+
 @app.route("/api/tickets/claim", methods=["POST"])
 def tickets_claim():
     data = request.get_json(silent=True) or {}
     codigo   = data.get("codigo_do_agente")
     carteira = data.get("carteira")
+
+    # NOVO: campos opcionais para pedido direcionado/prioridade
+    req_remetente = _normalize_remetente(data.get("remetente") or "")
+    req_phone_id  = (data.get("phone_id") or "").strip()
+    prioridade    = bool(data.get("prioridade"))
 
     if not isinstance(codigo, int) or not carteira:
         return jsonify({"ok": False, "erro": "codigo_do_agente (int) e carteira são obrigatórios"}), 400
@@ -974,6 +993,10 @@ def tickets_claim():
     phone_id = CARTEIRA_TO_PHONE.get(carteira)
     if not phone_id:
         return jsonify({"ok": False, "erro": "carteira desconhecida"}), 400
+
+    # se não mandou phone_id no pedido direcionado, usar o da carteira
+    if req_remetente and not req_phone_id:
+        req_phone_id = phone_id
 
     conn = get_conn(); cur = conn.cursor()
     try:
@@ -998,6 +1021,221 @@ def tickets_claim():
         """)
         conn.commit()
 
+        # ===== NOVO: fluxo de pedido direcionado/prioridade =====
+        if req_remetente:
+            # 2.1) já está em atendimento?
+            cur.execute("""
+                SELECT codigo_do_agente, nome_agente
+                  FROM conversas_em_andamento
+                 WHERE regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s , '(?<=^55\\d{2})9','') 
+                 AND phone_id=%s AND ended_at IS NULL
+                 LIMIT 1
+            """, (req_remetente, req_phone_id))
+            row = cur.fetchone()
+            if row:
+                # se é o próprio agente, apenas retorna ok com o ticket “dele”
+                if int(row["codigo_do_agente"]) == int(codigo):
+                    # monta pequeno payload do ticket a partir das tabelas de histórico
+                    cur.execute("""
+                        WITH msgs AS (
+                            SELECT data_hora,
+                                   CASE WHEN direcao='in'
+                                        THEN data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                                        ELSE data_hora END AS dh_adj,
+                                   mensagem AS mensagem_final
+                              FROM mensagens
+                             WHERE regexp_replace(remetente, '(?<=^55\\d{2})9','') = regexp_replace(%s, '(?<=^55\\d{2})9','') 
+                                AND phone_number_id=%s
+                             ORDER BY data_hora DESC
+                             LIMIT 1
+                        )
+                        SELECT m.mensagem_final, m.dh_adj AS data_hora
+                        FROM msgs m
+                    """, (req_remetente, req_phone_id))
+                    last = cur.fetchone() or {}
+                    return jsonify({
+                        "ok": True,
+                        "ticket": {
+                            "remetente": req_remetente,
+                            "phone_id": req_phone_id,
+                            "nome_exibicao": req_remetente,
+                            "mensagem_final": last.get("mensagem_final"),
+                            "data_hora": last.get("data_hora").isoformat() if last.get("data_hora") else None
+                        }
+                    })
+
+                # outro agente está atendendo -> informar quem é
+                return jsonify({
+                    "ok": False,
+                    "erro": "Conversa já está em atendimento por outro agente",
+                    "assigned_to": {
+                        "codigo": row["codigo_do_agente"],
+                        "nome": row["nome_agente"]
+                    }
+                }), 409
+
+            # 2.2) validar se o contato está elegível na carteira (mesma lógica base, porém filtrando o remetente)
+            sql_check = r"""
+                WITH dados AS (
+                    SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
+                           ea.telefone, ea.status, ea.conteudo,
+                           phone_id, string_to_array(ea.conteudo, ',') AS vars,
+                           (envios.template::json ->> 'bodyText') AS body_text
+                    FROM envios_analitico ea
+                    JOIN envios ON ea.nome_disparo = envios.nome_disparo
+                                AND ea.grupo_trabalho = envios.grupo_trabalho
+                ),
+                enviados AS (
+                    SELECT d.data_hora, d.telefone, d.phone_id, d.status,
+                           COALESCE(rep.txt, d.body_text) AS mensagem_final
+                    FROM dados d
+                    LEFT JOIN LATERAL (
+                        WITH RECURSIVE rep(i, txt) AS (
+                            SELECT 0, d.body_text
+                            UNION ALL
+                            SELECT i+1,
+                                   regexp_replace(
+                                       txt,
+                                       '\{\{' || (i+1) || '\}\}',
+                                       COALESCE(btrim(d.vars[i+1]), ''),
+                                       'g'
+                                   )
+                            FROM rep
+                            WHERE i < COALESCE(array_length(d.vars, 1), 0)
+                        )
+                        SELECT txt FROM rep ORDER BY i DESC LIMIT 1
+                    ) rep ON TRUE
+                ),
+                cliente_msg AS (
+                    SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
+                           direcao AS status, mensagem AS mensagem_final, msg_id
+                    FROM mensagens
+                ),
+                conversas AS (
+                    SELECT data_hora,
+                           regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone,
+                           phone_id, status, mensagem_final, ''::text AS msg_id
+                    FROM enviados
+                    UNION
+                    SELECT data_hora, telefone, phone_id, status, mensagem_final, msg_id
+                    FROM cliente_msg
+                    UNION
+                    SELECT data_hora, remetente AS telefone, phone_id, status, conteudo AS mensagem_final, ''::text AS msg_id
+                    FROM mensagens_avulsas WHERE status <> 'erro'
+                ),
+                msg_id AS (
+                    SELECT remetente, msg_id FROM (
+                        SELECT data_hora, remetente, msg_id,
+                               row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS idx
+                        FROM mensagens
+                    ) t WHERE idx = 1
+                ),
+                ranked AS (
+                    SELECT a.telefone, a.phone_id, a.status, a.mensagem_final, a.data_hora,
+                           b.msg_id,
+                           row_number() OVER (
+                              PARTITION BY a.telefone,a.phone_id
+                              ORDER BY CASE WHEN a.status='in'
+                                            THEN a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                                            ELSE a.data_hora END DESC
+                           ) AS rn
+                    FROM conversas a
+                    INNER JOIN msg_id b
+                      ON a.telefone = b.remetente
+                      OR a.telefone = regexp_replace(b.remetente, '(?<=^55\\d{2})9', '', 'g')
+                ), last_in AS (
+                    SELECT
+                      regexp_replace(remetente, '(?<=^55\\d{2})9', '', 'g') AS telefone,
+                      phone_number_id AS phone_id,
+                      MAX(CASE WHEN direcao<>'in'
+                               THEN data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                               ELSE data_hora END) AS last_in
+                    FROM mensagens
+                    GROUP BY 1,2
+                )
+                SELECT r.telefone AS remetente,
+                       (SELECT COALESCE(nome, r.telefone) FROM mensagens m
+                         WHERE m.remetente = r.telefone
+                         ORDER BY CASE WHEN r.status='in'
+                                       THEN m.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                                       ELSE m.data_hora END DESC
+                         LIMIT 1) AS nome_exibicao,
+                       r.phone_id,
+                       r.mensagem_final,
+                       (CASE WHEN r.status='in'
+                             THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                             ELSE r.data_hora END) AS data_hora,
+                       r.status
+                FROM ranked r
+                LEFT JOIN tickets_bloqueados tb
+                  ON tb.telefone = r.telefone AND tb.phone_id = r.phone_id
+                LEFT JOIN last_in li
+                  ON li.telefone = r.telefone AND li.phone_id = r.phone_id
+                WHERE r.rn = 1
+                  AND r.phone_id = %s
+                  AND regexp_replace(r.telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s, '(?<=^55\\d{2})9','')
+                  AND (CASE WHEN r.status='in'
+                            THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                            ELSE r.data_hora END) >= now() - interval '1 day'
+                  AND (tb.telefone IS NULL OR (li.last_in IS NOT NULL AND li.last_in > (tb.bloqueado_at AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'UTC'))
+                LIMIT 1
+            """
+            cur.execute(sql_check, (req_phone_id, req_remetente))
+            cand = cur.fetchone()
+            if not cand:
+                return jsonify({"ok": False, "erro": "Contato não está na fila desta carteira"}), 404
+
+            # 2.3) tentar reservar para este agente
+            try:
+                cur.execute("""
+                    INSERT INTO conversas_em_andamento
+                    (telefone, phone_id, carteira, codigo_do_agente, nome_agente)
+                    VALUES
+                    (%s, %s, %s, %s, (SELECT nome FROM agentes WHERE codigo_do_agente=%s))
+                    ON CONFLICT (telefone, phone_id) WHERE ended_at IS NULL DO NOTHING
+                    RETURNING telefone
+                """, (req_remetente, req_phone_id, carteira, codigo, codigo))
+                got = cur.fetchone()
+                if got:
+                    conn.commit()
+                    return jsonify({
+                        "ok": True,
+                        "ticket": {
+                            "remetente": cand["remetente"],
+                            "phone_id": cand["phone_id"],
+                            "nome_exibicao": cand["nome_exibicao"] or cand["remetente"],
+                            "mensagem_final": cand["mensagem_final"],
+                            "data_hora": cand["data_hora"].isoformat() if cand["data_hora"] else None
+                        }
+                    })
+                conn.rollback()
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                # corrida: alguém pegou agora; informe quem é
+                cur.execute("""
+                    SELECT codigo_do_agente, nome_agente
+                      FROM conversas_em_andamento
+                     WHERE regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s, '(?<=^55\\d{2})9','') 
+                        AND phone_id=%s AND ended_at IS NULL
+                     LIMIT 1
+                """, (req_remetente, req_phone_id))
+                holder = cur.fetchone()
+                if holder:
+                    return jsonify({
+                        "ok": False,
+                        "erro": "Conversa já está em atendimento por outro agente",
+                        "assigned_to": {
+                            "codigo": holder["codigo_do_agente"],
+                            "nome": holder["nome_agente"]
+                        }
+                    }), 409
+                # fallback genérico
+                return jsonify({"ok": False, "erro": "Não foi possível reservar, tente remover o digito 9"}), 409
+
+            # se chegou aqui sem sucesso, retorne genérico
+            return jsonify({"ok": False, "erro": "Não foi possível reservar"}), 409
+
+        # ===== FLUXO ORIGINAL (sem remetente) =====
         # 3) lista candidatos desta carteira (mesma lógica do /api/conversas/contatos com filtro)
         sql = r"""
             WITH dados AS (
@@ -1133,6 +1371,24 @@ def tickets_claim():
                 conn.rollback()
             except psycopg2.errors.UniqueViolation:
                 conn.rollback()
+                # informar quem está com o ticket (melhor UX)
+                cur.execute("""
+                    SELECT codigo_do_agente, nome_agente
+                      FROM conversas_em_andamento
+                     WHERE regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s, '(?<=^55\\d{2})9','') 
+                     AND phone_id=%s AND ended_at IS NULL
+                     LIMIT 1
+                """, (c["remetente"], phone_id))
+                holder = cur.fetchone()
+                if holder:
+                    return jsonify({
+                        "ok": False,
+                        "erro": "Conversa já está em atendimento por outro agente",
+                        "assigned_to": {
+                            "codigo": holder["codigo_do_agente"],
+                            "nome": holder["nome_agente"]
+                        }
+                    }), 409
                 continue
 
         return jsonify({"ok": False, "erro": "Sem conversas disponíveis nesta carteira"}), 404
@@ -1142,6 +1398,8 @@ def tickets_claim():
         return jsonify({"ok": False, "erro": f"claim falhou: {str(e)}"}), 500
     finally:
         cur.close(); conn.close()
+
+        
 @app.route("/api/tickets/minhas", methods=["GET"])
 def tickets_minhas():
     try:
