@@ -18,16 +18,6 @@ try:
 except ImportError:
     ZoneInfo = None
 
- # topo do arquivo
-from psycopg2.pool import SimpleConnectionPool
-POOL = SimpleConnectionPool(1, int(os.getenv("PG_MAXCONN","10")), dsn=DATABASE_URL,
-                            cursor_factory=psycopg2.extras.RealDictCursor)
-class DB:
-    def __enter__(self):
-        self.conn = POOL.getconn(); return self.conn
-    def __exit__(self, *exc):
-        POOL.putconn(self.conn)
-
 BASE_DIR = Path(__file__).resolve().parent
 
 # ==========================
