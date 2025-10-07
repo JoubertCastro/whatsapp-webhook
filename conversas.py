@@ -242,26 +242,26 @@ def listar_contatos():
                 ) rep ON TRUE
             ),
             cliente_msg AS (
-                SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
+                SELECT data_hora, remetente AS telefone,telefone_norm, phone_number_id AS phone_id,
                        direcao AS status, mensagem AS mensagem_final,msg_id
                 FROM mensagens
             ),
             conversas AS (
-                SELECT data_hora,
-                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
+                SELECT data_hora,telefone,
+                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone_norm,
                        phone_id, status, mensagem_final,''msg_id
                 FROM enviados
                 UNION
-                SELECT data_hora, telefone, phone_id, status, mensagem_final,msg_id
+                SELECT data_hora, telefone,telefone_norm, phone_id, status, mensagem_final,msg_id
                 FROM cliente_msg
                 UNION
-                SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
+                SELECT data_hora, remetente as telefone,telefone_norm,phone_id,status,conteudo as mensagem_final,''msg_id
 				from mensagens_avulsas where status not in ('erro')
                             ),
             msg_id AS (
-                SELECT remetente, msg_id
+                SELECT remetente,telefone_norm, msg_id
                 FROM (
-                    SELECT data_hora, remetente, msg_id,
+                    SELECT data_hora, remetente,telefone_norm, msg_id,
                         row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS indice
                     FROM mensagens
                 ) t
@@ -274,7 +274,7 @@ def listar_contatos():
                 FROM conversas a
                 INNER JOIN msg_id b
                   ON a.telefone = b.remetente
-                  OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
+                  OR a.telefone = b.telefone_norm
             )
             SELECT r.telefone AS remetente,
                    (SELECT COALESCE(nome, r.telefone) FROM mensagens m WHERE m.remetente = r.telefone ORDER BY case when status = 'in'then m.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else m.data_hora end DESC LIMIT 1) AS nome_exibicao,
@@ -1044,14 +1044,15 @@ def tickets_claim():
                                         ELSE data_hora END AS dh_adj,
                                    mensagem AS mensagem_final
                               FROM mensagens
-                             WHERE regexp_replace(remetente, '(?<=^55\\d{2})9','') = regexp_replace(%s, '(?<=^55\\d{2})9','') 
-                                AND phone_number_id=%s
+                             WHERE remetente = %s
+                                or telefone_norm = %s
+                                AND phone_number_id= %s
                              ORDER BY data_hora DESC
                              LIMIT 1
                         )
                         SELECT m.mensagem_final, m.dh_adj AS data_hora
                         FROM msgs m
-                    """, (req_remetente, req_phone_id))
+                    """, (req_remetente,req_remetente, req_phone_id))
                     last = cur.fetchone() or {}
                     return jsonify({
                         "ok": True,
@@ -1269,25 +1270,25 @@ def tickets_claim():
                 ) rep ON TRUE
             ),
             cliente_msg AS (
-                SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
+                SELECT data_hora, remetente AS telefone,telefone_norm, phone_number_id AS phone_id,
                        direcao AS status, mensagem AS mensagem_final, msg_id
                 FROM mensagens
             ),
             conversas AS (
-                SELECT data_hora,
-                       regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone,
+                SELECT data_hora,telefone,
+                       regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone_norm,
                        phone_id, status, mensagem_final, ''::text AS msg_id
                 FROM enviados
                 UNION
-                SELECT data_hora, telefone, phone_id, status, mensagem_final, msg_id
+                SELECT data_hora, telefone,telefone_norm, phone_id, status, mensagem_final, msg_id
                 FROM cliente_msg
                 UNION
-                SELECT data_hora, remetente AS telefone, phone_id, status, conteudo AS mensagem_final, ''::text AS msg_id
+                SELECT data_hora, remetente AS telefone,telefone_norm, phone_id, status, conteudo AS mensagem_final, ''::text AS msg_id
                 FROM mensagens_avulsas WHERE status <> 'erro'
             ),
             msg_id AS (
-                SELECT remetente, msg_id FROM (
-                    SELECT data_hora, remetente, msg_id,
+                SELECT remetente,telefone_norm, msg_id FROM (
+                    SELECT data_hora, remetente,telefone_norm, msg_id,
                            row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS idx
                     FROM mensagens
                 ) t WHERE idx = 1
@@ -1304,10 +1305,10 @@ def tickets_claim():
                 FROM conversas a
                 INNER JOIN msg_id b
                   ON a.telefone = b.remetente
-                  OR a.telefone = regexp_replace(b.remetente, '(?<=^55\\d{2})9', '', 'g')
+                  OR a.telefone = b.telefone_norm
             ),last_in AS (
                 SELECT
-                  regexp_replace(remetente, '(?<=^55\\d{2})9', '', 'g') AS telefone,
+                  remetente AS telefone,
                   phone_number_id AS phone_id,
                   MAX(CASE WHEN direcao<>'in'
                            THEN data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
@@ -1334,7 +1335,7 @@ def tickets_claim():
             LEFT JOIN last_in li
               ON li.telefone = r.telefone AND li.phone_id = r.phone_id
             WHERE r.rn = 1
-              AND r.phone_id = %s
+              AND r.phone_id = '%s'
               AND (CASE WHEN r.status='in'
                         THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
                         ELSE r.data_hora END) >= now() - interval '1 day'
@@ -1441,25 +1442,25 @@ def tickets_minhas():
                 ) rep ON TRUE
             ),
             cliente_msg AS (
-                SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
+                SELECT data_hora, remetente AS telefone,telefone_norm, phone_number_id AS phone_id,
                        direcao AS status, mensagem AS mensagem_final, msg_id
                 FROM mensagens
             ),
             conversas AS (
-                SELECT data_hora,
-                       regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone,
+                SELECT data_hora,telefone,
+                       regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone_norm,
                        phone_id, status, mensagem_final, ''::text AS msg_id
                 FROM enviados
                 UNION
-                SELECT data_hora, telefone, phone_id, status, mensagem_final, msg_id
+                SELECT data_hora, telefone,telefone_norm, phone_id, status, mensagem_final, msg_id
                 FROM cliente_msg
                 UNION
-                SELECT data_hora, remetente AS telefone, phone_id, status, conteudo AS mensagem_final, ''::text AS msg_id
+                SELECT data_hora, remetente AS telefone,telefone_norm, phone_id, status, conteudo AS mensagem_final, ''::text AS msg_id
                 FROM mensagens_avulsas WHERE status <> 'erro'
             ),
             msg_id AS (
-                SELECT remetente, msg_id FROM (
-                    SELECT data_hora, remetente, msg_id,
+                SELECT remetente,telefone_norm, msg_id FROM (
+                    SELECT data_hora, remetente,telefone_norm, msg_id,
                            row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS idx
                     FROM mensagens
                 ) t WHERE idx = 1
@@ -1476,7 +1477,7 @@ def tickets_minhas():
                 FROM conversas a
                 INNER JOIN msg_id b
                         ON a.telefone = b.remetente
-                        OR a.telefone = regexp_replace(b.remetente, '(?<=^55\\d{2})9', '', 'g')
+                        OR a.telefone = b.telefone_norm
             )
             SELECT r.telefone AS remetente,
                    (SELECT COALESCE(nome, r.telefone)
