@@ -7,14 +7,14 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 
 #DATABASE_URL = os.getenv("DATABASE_URL")
-DATABASE_URL = os.getenv("DATABASE_URL","postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway")
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v23.0")
+DATABASE_URL = os.getenv("DATABASE_URL","postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway")
 
 # Tuning via env
-BATCH_SIZE        = int(os.getenv("BATCH_SIZE", "200"))     # contatos por página
-MSG_INTERVAL_S    = float(os.getenv("INTERVALO_MSG", "0.00"))  # pausa entre msgs (segundos)
+BATCH_SIZE        = int(os.getenv("BATCH_SIZE", "200"))
+MSG_INTERVAL_S    = float(os.getenv("INTERVALO_MSG", "0.00"))
 LOTE_INTERVAL_MIN = float(os.getenv("INTERVALO_LOTE_MIN", "0"))
-RATE_LIMIT_RPS    = float(os.getenv("RATE_LIMIT_RPS", "20"))   # req/seg por phone_id
+RATE_LIMIT_RPS    = float(os.getenv("RATE_LIMIT_RPS", "20"))
 HTTP_TIMEOUT_S    = float(os.getenv("HTTP_TIMEOUT_S", "15"))
 RETRY_MAX         = int(os.getenv("RETRY_MAX", "3"))
 
@@ -26,15 +26,34 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 signal.signal(signal.SIGINT, handle_sigterm)
 
 # ---------- POOL DE CONEXÕES ----------
-pool = SimpleConnectionPool(minconn=1, maxconn=int(os.getenv("PG_MAXCONN", "10")),
-                            dsn=DATABASE_URL,
-                            cursor_factory=psycopg2.extras.RealDictCursor)
+def _create_pool():
+    if not DATABASE_URL or DATABASE_URL.strip() == "":
+        raise RuntimeError("DATABASE_URL ausente para o worker; defina a env no processo.")
+    # tenta algumas vezes antes de desistir (útil em deploy com cold start do Postgres)
+    attempts = 0
+    last_err = None
+    while attempts < 5:
+        try:
+            return SimpleConnectionPool(
+                minconn=1,
+                maxconn=int(os.getenv("PG_MAXCONN", "10")),
+                dsn=DATABASE_URL,
+                cursor_factory=psycopg2.extras.RealDictCursor
+            )
+        except Exception as e:
+            last_err = e
+            attempts += 1
+            time.sleep(min(2 * attempts, 10))
+    raise last_err
+
+pool = _create_pool()
 
 def get_conn():
     return pool.getconn()
 
 def put_conn(conn):
-    pool.putconn(conn)
+    if conn:
+        pool.putconn(conn)
 
 # ---------- HTTP SESSION (retry/backoff) ----------
 session = requests.Session()
