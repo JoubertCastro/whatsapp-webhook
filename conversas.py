@@ -1027,10 +1027,12 @@ def tickets_claim():
             cur.execute("""
                 SELECT codigo_do_agente, nome_agente
                   FROM conversas_em_andamento
-                 WHERE regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s , '(?<=^55\\d{2})9','') 
+                 WHERE 1=1 
+                 and (regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s , '(?<=^55\\d{2})9','')
+                        or regexp_replace(telefone, '(?<=^55\\d{2})9','') = %s )
                  AND phone_id=%s AND ended_at IS NULL
                  LIMIT 1
-            """, (req_remetente, req_phone_id))
+            """, (req_remetente,req_remetente, req_phone_id))
             row = cur.fetchone()
             if row:
                 # se é o próprio agente, apenas retorna ok com o ticket “dele”
@@ -1044,8 +1046,9 @@ def tickets_claim():
                                         ELSE data_hora END AS dh_adj,
                                    mensagem AS mensagem_final
                               FROM mensagens
-                             WHERE remetente = %s
-                                or telefone_norm = %s
+                             WHERE 1=1 
+                                and (remetente = %s
+                                or telefone_norm = %s)
                                 AND phone_number_id= %s
                              ORDER BY data_hora DESC
                              LIMIT 1
@@ -1217,10 +1220,12 @@ def tickets_claim():
                 cur.execute("""
                     SELECT codigo_do_agente, nome_agente
                       FROM conversas_em_andamento
-                     WHERE regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s, '(?<=^55\\d{2})9','') 
+                    WHERE 1=1 
+                    and (regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s , '(?<=^55\\d{2})9','')
+                            or regexp_replace(telefone, '(?<=^55\\d{2})9','') = %s )
                         AND phone_id=%s AND ended_at IS NULL
                      LIMIT 1
-                """, (req_remetente, req_phone_id))
+                """, (req_remetente,req_remetente, req_phone_id))
                 holder = cur.fetchone()
                 if holder:
                     return jsonify({
@@ -1377,10 +1382,12 @@ def tickets_claim():
                 cur.execute("""
                     SELECT codigo_do_agente, nome_agente
                       FROM conversas_em_andamento
-                     WHERE regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s, '(?<=^55\\d{2})9','') 
+                        WHERE 1=1 
+                        and (regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s , '(?<=^55\\d{2})9','')
+                                or regexp_replace(telefone, '(?<=^55\\d{2})9','') = %s )
                      AND phone_id=%s AND ended_at IS NULL
                      LIMIT 1
-                """, (c["remetente"], phone_id))
+                """, (c["remetente"],c["remetente"], phone_id))
                 holder = cur.fetchone()
                 if holder:
                     return jsonify({
