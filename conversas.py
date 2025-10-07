@@ -1182,7 +1182,7 @@ def tickets_claim():
                   AND (tb.telefone IS NULL OR (li.last_in IS NOT NULL AND li.last_in > (tb.bloqueado_at AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'UTC'))
                 LIMIT 1
             """
-            cur.execute(sql_check, (req_phone_id, req_remetente))
+            cur.execute(sql_check, (req_phone_id, req_remetente,req_remetente))
             cand = cur.fetchone()
             if not cand:
                 return jsonify({"ok": False, "erro": "Contato não está na fila desta carteira"}), 404
