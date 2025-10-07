@@ -1174,8 +1174,8 @@ def tickets_claim():
                   ON li.telefone = r.telefone AND li.phone_id = r.phone_id
                 WHERE r.rn = 1
                   AND r.phone_id = %s
-                  AND regexp_replace(r.telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s, '(?<=^55\\d{2})9','')
-                  OR regexp_replace(r.telefone, '(?<=^55\\d{2})9','') = %s
+                  AND (regexp_replace(r.telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s, '(?<=^55\\d{2})9','')
+                  OR regexp_replace(r.telefone, '(?<=^55\\d{2})9','') = %s)
                   AND (CASE WHEN r.status='in'
                             THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
                             ELSE r.data_hora END) >= now() - interval '1 day'
