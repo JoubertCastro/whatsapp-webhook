@@ -1184,7 +1184,7 @@ def tickets_claim():
             cur.execute(sql_check, (req_phone_id, req_remetente))
             cand = cur.fetchone()
             if not cand:
-                return jsonify({"ok": False, "erro": "Contato não está na fila desta carteira"}), 404
+                return jsonify({"ok": False, "erro": "Contato não está na fila desta carteira colocar 9"}), 404
 
             # 2.3) tentar reservar para este agente
             try:
