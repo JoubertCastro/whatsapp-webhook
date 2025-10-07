@@ -1175,6 +1175,7 @@ def tickets_claim():
                 WHERE r.rn = 1
                   AND r.phone_id = %s
                   AND regexp_replace(r.telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s, '(?<=^55\\d{2})9','')
+                  OR regexp_replace(r.telefone, '(?<=^55\\d{2})9','') = %s
                   AND (CASE WHEN r.status='in'
                             THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
                             ELSE r.data_hora END) >= now() - interval '1 day'
@@ -1184,7 +1185,7 @@ def tickets_claim():
             cur.execute(sql_check, (req_phone_id, req_remetente))
             cand = cur.fetchone()
             if not cand:
-                return jsonify({"ok": False, "erro": "Contato não está na fila desta carteira colocar 9"}), 404
+                return jsonify({"ok": False, "erro": "Contato não está na fila desta carteira"}), 404
 
             # 2.3) tentar reservar para este agente
             try:
