@@ -7,12 +7,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
-
 import psycopg2
 import psycopg2.extras
-from psycopg2.pool import SimpleConnectionPool
 import requests
-from requests.adapters import HTTPAdapter, Retry
 import yaml
 
 from datetime import datetime, time as dtime, timezone, timedelta
@@ -21,85 +18,39 @@ try:
 except ImportError:
     ZoneInfo = None
 
-# ==========================
-# Paths / Base
-# ==========================
+ # topo do arquivo
+from psycopg2.pool import SimpleConnectionPool
+POOL = SimpleConnectionPool(1, int(os.getenv("PG_MAXCONN","10")), dsn=DATABASE_URL,
+                            cursor_factory=psycopg2.extras.RealDictCursor)
+class DB:
+    def __enter__(self):
+        self.conn = POOL.getconn(); return self.conn
+    def __exit__(self, *exc):
+        POOL.putconn(self.conn)
+
 BASE_DIR = Path(__file__).resolve().parent
 
 # ==========================
 # Config via ambiente
 # ==========================
-DATABASE_URL   = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
+)
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-PHONE_ID       = os.getenv("PHONE_ID")
-GRAPH_VERSION  = os.getenv("GRAPH_VERSION", "v23.0")
-WABA_ID        = os.getenv("WABA_ID", "")
+PHONE_ID = os.getenv("PHONE_ID")
+GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v23.0")
+WABA_ID = os.getenv("WABA_ID", "")
 
 # Restrição opcional por conta/phone_id (se definido, o webhook só processa esses IDs)
 ALLOWED_PHONE_IDS = set(filter(None, os.getenv("ALLOWED_PHONE_IDS", "").split(",")))  # ex: "732661079928516"
-ALLOWED_WABA_IDS  = set(filter(None, os.getenv("ALLOWED_WABA_IDS", "").split(",")))   # ex: "1910445533050310"
-
-# HTTP tuning
-HTTP_TIMEOUT_S = float(os.getenv("HTTP_TIMEOUT_S", "15"))
-RETRY_MAX      = int(os.getenv("RETRY_MAX", "3"))
-
-# Sanitização de ctx após webhooks externos
-SAFE_KEYS = set(filter(None, (os.getenv("FLOW_SAFE_CTX_KEYS", "id,status,valor,nome").split(","))))
-SAFE_STR_MAXLEN = int(os.getenv("FLOW_SAFE_STR_MAXLEN", "500"))
+ALLOWED_WABA_IDS = set(filter(None, os.getenv("ALLOWED_WABA_IDS", "").split(",")))    # ex: "1910445533050310"
 
 # ==========================
-# Conexão Postgres (pool)
+# Conexão Postgres
 # ==========================
-POOL = SimpleConnectionPool(
-    1, int(os.getenv("PG_MAXCONN", "10")),
-    dsn=DATABASE_URL,
-    cursor_factory=psycopg2.extras.RealDictCursor
-)
-
-class DB:
-    def __enter__(self):
-        self.conn = POOL.getconn()
-        return self.conn
-    def __exit__(self, exc_type, exc, tb):
-        POOL.putconn(self.conn)
-
 def get_conn():
-    """Compatível com 'with get_conn() as conn'."""
-    return DB()
-
-# ==========================
-# HTTP Session com Retry
-# ==========================
-_http = requests.Session()
-_http.mount(
-    "https://",
-    HTTPAdapter(
-        max_retries=Retry(
-            total=RETRY_MAX,
-            backoff_factor=1.5,
-            status_forcelist=(429, 500, 502, 503, 504),
-            allowed_methods=["GET", "POST"]
-        )
-    )
-)
-
-def _post_json(url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], int]:
-    r = _http.post(url, headers=headers, json=payload, timeout=HTTP_TIMEOUT_S)
-    try:
-        content_type = r.headers.get("Content-Type", "")
-        body = r.json() if "application/json" in content_type else {"raw": r.text}
-        return r.ok, body, r.status_code
-    finally:
-        r.close()
-
-def _get_json(url: str, headers: Dict[str, str], params: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], int]:
-    r = _http.get(url, headers=headers, params=params, timeout=HTTP_TIMEOUT_S)
-    try:
-        content_type = r.headers.get("Content-Type", "")
-        body = r.json() if "application/json" in content_type else {"raw": r.text}
-        return r.ok, body, r.status_code
-    finally:
-        r.close()
+    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 # ==========================
 # Auxiliares WhatsApp API
@@ -110,14 +61,21 @@ def send_wa_text(to: str, body: str, phone_id: Optional[str] = None, token: Opti
     if not pid:
         return {"error": {"message": "PHONE_ID ausente"}}
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{pid}/messages"
-    headers = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
-    ok, resp, _ = _post_json(url, headers, {
+    headers = {
+        "Authorization": f"Bearer {tok}",
+        "Content-Type": "application/json",
+    }
+    payload = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
         "text": {"preview_url": False, "body": body[:4000]},
-    })
-    return resp
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    try:
+        return r.json()
+    finally:
+        r.close()
 
 def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]], phone_id: Optional[str] = None, token: Optional[str] = None) -> Dict[str, Any]:
     pid = phone_id or PHONE_ID
@@ -125,12 +83,15 @@ def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]], phone_id
     if not pid:
         return {"error": {"message": "PHONE_ID ausente"}}
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{pid}/messages"
-    headers = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {tok}",
+        "Content-Type": "application/json",
+    }
     buttons = [
-        {"type": "reply", "reply": {"id": str(v)[:256], "title": str(l)[:20]}}
+        {"type": "reply", "reply": {"id": v[:256], "title": l[:20]}}
         for (l, v) in options[:3]
     ]
-    ok, resp, _ = _post_json(url, headers, {
+    payload = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "interactive",
@@ -139,8 +100,12 @@ def send_wa_buttons(to: str, body: str, options: List[Tuple[str, str]], phone_id
             "body": {"text": body[:1024]},
             "action": {"buttons": buttons},
         },
-    })
-    return resp
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    try:
+        return r.json()
+    finally:
+        r.close()
 
 # ==========================
 # Motor de fluxo
@@ -161,30 +126,14 @@ class Flow:
             for nid, nd in spec["nodes"].items()
         }
 
-# Cache por mtime (evita IO/parsing por mensagem)
-from functools import lru_cache
-import os as _os
-
-@lru_cache(maxsize=64)
-def _load_flow_cached(path_str: str, mtime: float) -> Flow:
-    with open(path_str, "r", encoding="utf-8") as f:
-        spec = yaml.safe_load(f)
-    return Flow(spec)
-
-def _safe_flow_path(path: str) -> Path:
-    p = Path(path)
-    if not p.is_absolute():
-        p = BASE_DIR / p
-    # impede path traversal
-    p = p.resolve()
-    if not str(p).startswith(str(BASE_DIR)):
-        raise ValueError("flow_file fora do diretório permitido")
-    return p
-
-def load_flow_from_file(path: str) -> Flow:
-    p = _safe_flow_path(path)
-    st = _os.stat(p)
-    return _load_flow_cached(str(p), st.st_mtime)
+    @staticmethod
+    def load_from_file(path: str) -> "Flow":
+        p = Path(path)
+        if not p.is_absolute():
+            p = BASE_DIR / p
+        with open(p, "r", encoding="utf-8") as f:
+            spec = yaml.safe_load(f)
+        return Flow(spec)
 
 # ==========================
 # Sessão e armazenamento
@@ -201,39 +150,47 @@ class Session:
 class Store:
     @staticmethod
     def get_session(wa_phone: str) -> Optional[Session]:
-        # Lock pessimista evita interleaving entre mensagens simultâneas
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""
-                SELECT * FROM bot_sessions
-                 WHERE wa_phone=%s
-                 FOR UPDATE
-            """, (wa_phone,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            return Session(
-                wa_phone=row["wa_phone"],
-                flow_id=row["flow_id"],
-                node_id=row["node_id"],
-                ctx=row.get("ctx") or {},
-                contact=row.get("contact") or {},
-                assigned=row.get("assigned", "virtual"),
+            cur.execute(
+                "SELECT * FROM bot_sessions WHERE wa_phone=%s ORDER BY updated_at DESC LIMIT 1",
+                (wa_phone,),
             )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return Session(
+            wa_phone=row["wa_phone"],
+            flow_id=row["flow_id"],
+            node_id=row["node_id"],
+            ctx=row["ctx"] or {},
+            contact=row["contact"] or {},
+            assigned=row["assigned"],
+        )
 
     @staticmethod
     def upsert_session(s: Session) -> None:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO bot_sessions (wa_phone, flow_id, node_id, ctx, contact, assigned, updated_at)
-                VALUES (%s,%s,%s,%s::jsonb,%s::jsonb,%s,NOW())
+                VALUES (%s,%s,%s,%s::jsonb,%s::jsonb,%s, NOW())
                 ON CONFLICT (wa_phone) DO UPDATE SET
-                  flow_id   = EXCLUDED.flow_id,
-                  node_id   = EXCLUDED.node_id,
-                  ctx       = EXCLUDED.ctx,
-                  contact   = EXCLUDED.contact,
-                  assigned  = EXCLUDED.assigned,
-                  updated_at= NOW()
-            """, (s.wa_phone, s.flow_id, s.node_id, json.dumps(s.ctx), json.dumps(s.contact), s.assigned))
+                    flow_id = EXCLUDED.flow_id,
+                    node_id = EXCLUDED.node_id,
+                    ctx = EXCLUDED.ctx,
+                    contact = EXCLUDED.contact,
+                    assigned = EXCLUDED.assigned,
+                    updated_at = NOW()
+                """,
+                (
+                    s.wa_phone,
+                    s.flow_id,
+                    s.node_id,
+                    json.dumps(s.ctx),
+                    json.dumps(s.contact),
+                    s.assigned,
+                ),
+            )
 
     @staticmethod
     def log(wa_phone: str, direction: str, payload: Dict[str, Any]) -> None:
@@ -330,7 +287,7 @@ class Engine:
                 if incoming_text is not None and awaiting == node.id:
                     save_as = data.get("save_as")
                     if save_as:
-                        session.ctx[save_as] = str(incoming_text).strip()[:120]
+                        session.ctx[save_as] = incoming_text.strip()[:120]
                     session.ctx.pop("_awaiting_question", None)
                     session.node_id = data.get("next")
                     node = self.flow.nodes[session.node_id]
@@ -340,7 +297,7 @@ class Engine:
 
                 # Ainda não perguntamos (neste node): envia pergunta (se houver texto) e marca aguardando
                 q_text = render_text(data.get("text", ""), {"ctx": session.ctx, "contact": session.contact})
-                if q_text:
+                if q_text:  # só envia se houver conteúdo
                     out_messages.append({"type": "text", "text": q_text})
                 session.ctx["_awaiting_question"] = node.id
                 break  # espera próxima mensagem do cliente
@@ -377,27 +334,25 @@ class Engine:
                     body = data.get("body") or {}
                     rendered_body = json.loads(render_text(json.dumps(body), {"ctx": session.ctx, "contact": session.contact}))
                     try:
-                        headers = {}
                         if method == "POST":
-                            ok, payload, _ = _post_json(url, headers, rendered_body)
+                            resp = requests.post(url, json=rendered_body, timeout=30)
                         else:
-                            ok, payload, _ = _get_json(url, headers, rendered_body)
-
-                        # merge “higienizado” no ctx
-                        _merge_ctx_from_payload(session.ctx, payload)
-
-                        next_id = (data.get("on_success_next") or data.get("next")) if ok else (data.get("on_error_next") or data.get("fallback_next") or session.node_id)
+                            resp = requests.get(url, params=rendered_body, timeout=30)
+                        payload = resp.json() if "application/json" in resp.headers.get("Content-Type", "") else {"text": resp.text}
+                        for k, v in payload.items():
+                            session.ctx[k] = v
+                        next_id = data.get("on_success_next") or data.get("next")
                         session.node_id = next_id
                     except Exception:
                         session.node_id = data.get("on_error_next") or data.get("fallback_next") or session.node_id
-                    node = self.flow.nodes.get(session.node_id, node)
+                    node = self.flow.nodes[session.node_id]
                     progressed = True
                     session.ctx.pop("_awaiting_question", None)
                     continue
 
                 elif act == "delay":
                     seconds = int(data.get("seconds") or 0)
-                    seconds = max(0, min(seconds, 5))  # sanidade: não travar o handler
+                    seconds = max(0, min(seconds, 30))  # sanidade
                     if seconds > 0:
                         time.sleep(seconds)
                     session.node_id = data.get("next") or session.node_id
@@ -482,14 +437,6 @@ def _extract_msg_id(resp_json: Dict[str, Any]) -> Optional[str]:
         pass
     return None
 
-def _normalize_tel(p: str) -> str:
-    d = re.sub(r"\D", "", p or "")
-    if not d.startswith("55"):
-        d = "55" + d
-    if len(d) >= 13 and d[4] == "9":
-        d = d[:4] + d[5:]
-    return d
-
 def _save_outgoing_to_avulsas(
     telefone: str,
     conteudo: str,
@@ -500,19 +447,17 @@ def _save_outgoing_to_avulsas(
     resposta_raw: Optional[Dict[str, Any]],
     nome_exibicao: str = "Agente Virtual"
 ) -> None:
-    tel_norm = _normalize_tel(telefone)
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO mensagens_avulsas
-                    (nome_exibicao, remetente, telefone_norm, conteudo, phone_id, waba_id, status, msg_id, resposta_raw)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    (nome_exibicao, remetente, conteudo, phone_id, waba_id, status, msg_id, resposta_raw)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                 """,
                 (
                     nome_exibicao,
                     telefone,
-                    tel_norm,
                     conteudo,
                     phone_id,
                     waba_id,
@@ -524,17 +469,6 @@ def _save_outgoing_to_avulsas(
     except Exception:
         # não derruba o fluxo se o log falhar
         pass
-
-def _merge_ctx_from_payload(ctx: Dict[str, Any], payload: Dict[str, Any]) -> None:
-    """Só adiciona chaves seguras e corta strings muito grandes."""
-    if not isinstance(payload, dict):
-        return
-    for k, v in payload.items():
-        if k not in SAFE_KEYS:
-            continue
-        if isinstance(v, str) and len(v) > SAFE_STR_MAXLEN:
-            v = v[:SAFE_STR_MAXLEN]
-        ctx[k] = v
 
 # ==========================
 # Função plug-and-play para o webhook
@@ -548,20 +482,9 @@ def handle_incoming(
     waba_id: Optional[str] = None,
     token: Optional[str] = None,
 ) -> None:
-    # filtros opcionais por conta
-    if ALLOWED_PHONE_IDS and (phone_id or PHONE_ID) not in ALLOWED_PHONE_IDS:
-        Store.log(wa_phone, "err", {"error": "phone_id não permitido", "phone_id": phone_id or PHONE_ID})
-        return
-    if ALLOWED_WABA_IDS and (waba_id or WABA_ID) not in ALLOWED_WABA_IDS:
-        Store.log(wa_phone, "err", {"error": "waba_id não permitido", "waba_id": waba_id or WABA_ID})
-        return
-
     Store.log(wa_phone, "in", {"text": incoming_text or ""})
 
-    # carrega flow (cacheado por mtime)
-    flow = load_flow_from_file(flow_file)
-
-    # carrega sessão com lock
+    flow = Flow.load_from_file(flow_file)
     session = Store.get_session(wa_phone)
     if not session:
         session = Session(
@@ -576,14 +499,12 @@ def handle_incoming(
         if contact:
             session.contact.update(contact)
 
-    # processa um passo do fluxo
     engine = Engine(flow)
     session, out_msgs = engine.step(session, incoming_text)
 
     pid = phone_id or PHONE_ID
     wid = waba_id or WABA_ID
 
-    # envia as mensagens de saída
     for msg in out_msgs:
         if msg["type"] == "text":
             resp = send_wa_text(wa_phone, msg["text"], phone_id=pid, token=token)
@@ -625,5 +546,4 @@ def handle_incoming(
                 nome_exibicao="Agente Virtual",
             )
 
-    # persiste sessão (idempotente)
     Store.upsert_session(session)
