@@ -6,7 +6,8 @@ from psycopg2.pool import SimpleConnectionPool
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+#DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL","postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway")
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v23.0")
 
 # Tuning via env
