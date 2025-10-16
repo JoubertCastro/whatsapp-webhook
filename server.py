@@ -803,6 +803,7 @@ def _pendentes_base_sql(agregado=False):
                    (SELECT COALESCE(nome, r.telefone) FROM mensagens m WHERE m.remetente = r.telefone ORDER BY case when status = 'in'then m.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else m.data_hora end DESC LIMIT 1) AS nome_exibicao,
                    case 
 				   	when r.phone_id = '732661079928516' then 'ConnectZap'
+				   	when r.phone_id = '828473960349364' then 'ConnectZap_teste'
 				   	when r.phone_id = '727586317113885' then 'Recovery PJ'
 				   	when r.phone_id = '802977069563598' then 'Recovery PF'
 				   	when r.phone_id = '821562937700669' then 'Mercado Pago Cobrança'
@@ -904,6 +905,7 @@ def _pendentes_base_sql(agregado=False):
                    (SELECT COALESCE(nome, r.telefone) FROM mensagens m WHERE m.remetente = r.telefone ORDER BY case when status = 'in'then m.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else m.data_hora end DESC LIMIT 1) AS nome_exibicao,
                    case 
 				   	when r.phone_id = '732661079928516' then 'ConnectZap'
+				   	when r.phone_id = '828473960349364' then 'ConnectZap_teste'
 				   	when r.phone_id = '727586317113885' then 'Recovery PJ'
 				   	when r.phone_id = '802977069563598' then 'Recovery PF'
 				   	when r.phone_id = '821562937700669' then 'Mercado Pago Cobrança'

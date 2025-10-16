@@ -475,6 +475,7 @@ def listar_agentes():
               WHERE carteira IN (
                 SELECT nome FROM (VALUES
                   ('ConnectZap','732661079928516'),
+                  ('ConnectZap_teste','828473960349364'),                        
                   ('Recovery PJ','727586317113885'),
                   ('Recovery PF','802977069563598'),
                   ('Mercado Pago Cobrança','821562937700669'),
