@@ -148,9 +148,10 @@ def claim_envio():
         with conn, conn.cursor() as cur:
             cur.execute("""
                 WITH picked AS (
-                  SELECT id
-                  FROM envios
-                  WHERE status = 'pendente'
+                  SELECT a.id
+                  FROM envios a
+				  	inner join envios_analitico b on a.id = b.envio_id
+                  WHERE b.status = 'pendente'
                     AND (
                       modo_envio = 'imediato'
                       OR (modo_envio = 'agendar' AND data_hora_agendamento <= NOW())
