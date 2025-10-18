@@ -519,7 +519,7 @@ def get_image_url_by_msgid(msg_id):
 
         # 2. Buscar URL temporária no Graph
         token = DEFAULT_TOKEN
-        graph_url = f"https://graph.facebook.com/v23.0/{image_id}"
+        graph_url = f"https://graph.facebook.com/v24.0/{image_id}"
         meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
         meta_resp.raise_for_status()
         data = meta_resp.json()
@@ -579,7 +579,7 @@ def get_audio_by_msgid(msg_id):
 
         # 2. Buscar URL temporária no Graph
         token = DEFAULT_TOKEN
-        graph_url = f"https://graph.facebook.com/v23.0/{audio_id}"
+        graph_url = f"https://graph.facebook.com/v24.0/{audio_id}"
         meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
         meta_resp.raise_for_status()
         data = meta_resp.json()
@@ -754,7 +754,7 @@ def get_document_by_msgid(msg_id):
 
         # 2) Consulta o Graph pra pegar a URL lookaside e o mime_type
         token     = DEFAULT_TOKEN
-        graph_url = f"https://graph.facebook.com/v23.0/{doc_id}"
+        graph_url = f"https://graph.facebook.com/v24.0/{doc_id}"
         meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
         meta_resp.raise_for_status()
         data      = meta_resp.json()
@@ -831,7 +831,7 @@ def download_document_by_msgid(msg_id):
         filename = row.get("filename") or "arquivo"
 
         token     = DEFAULT_TOKEN
-        graph_url = f"https://graph.facebook.com/v23.0/{doc_id}"
+        graph_url = f"https://graph.facebook.com/v24.0/{doc_id}"
         meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
         meta_resp.raise_for_status()
         data      = meta_resp.json()
@@ -884,7 +884,7 @@ def enviar_mensagem(telefone):
     if not token or not phone_id:
         return jsonify({"ok": False, "erro": "token ou phone_id não configurados"}), 400
 
-    url = f"https://graph.facebook.com/v23.0/{phone_id}/messages"
+    url = f"https://graph.facebook.com/v24.0/{phone_id}/messages"
 
     if pdf_url and filename:
         # Se for PDF
