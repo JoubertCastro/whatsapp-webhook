@@ -6,12 +6,15 @@ import boto3
 from botocore.client import Config
 
 from psycopg2.pool import ThreadedConnectionPool
+import base64
+import psycopg2.errors
+import re
 
 # --- DB Pool (global por processo) ---
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway")
 PG_POOL_MIN = int(os.getenv("PG_POOL_MIN", "1"))
 PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "10"))
-PG_STATEMENT_TIMEOUT_MS = int(os.getenv("PG_STATEMENT_TIMEOUT_MS", "30000"))  # 30s
+PG_STATEMENT_TIMEOUT_MS = int(os.getenv("PG_STATEMENT_TIMEOUT_MS", "30000"))
 
 _pg_pool = ThreadedConnectionPool(
     minconn=PG_POOL_MIN,
@@ -27,17 +30,17 @@ def get_conn():
             _c.execute("SET statement_timeout TO %s", (PG_STATEMENT_TIMEOUT_MS,))
         return conn
     except Exception:
-        # se falhar, devolve a conexão e propaga
-        _pg_pool.putconn(conn)
+        # devolve a conexão ao pool e propaga o erro (NÃO recursione!)
+        try:
+            _pg_pool.putconn(conn)
+        finally:
+            pass
         raise
 
 def put_conn(conn):
     if conn:
         _pg_pool.putconn(conn)
-    import base64
-import psycopg2.errors
-import re
-
+        
 app = Flask(__name__)
 
 CARTEIRA_TO_PHONE = {
