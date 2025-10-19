@@ -4,43 +4,10 @@ import psycopg2, psycopg2.extras, os, requests, json
 from datetime import datetime
 import boto3
 from botocore.client import Config
-
-from psycopg2.pool import ThreadedConnectionPool
 import base64
 import psycopg2.errors
 import re
 
-# --- DB Pool (global por processo) ---
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway")
-PG_POOL_MIN = int(os.getenv("PG_POOL_MIN", "1"))
-PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "10"))
-PG_STATEMENT_TIMEOUT_MS = int(os.getenv("PG_STATEMENT_TIMEOUT_MS", "30000"))
-
-_pg_pool = ThreadedConnectionPool(
-    minconn=PG_POOL_MIN,
-    maxconn=PG_POOL_MAX,
-    dsn=DATABASE_URL,
-    cursor_factory=psycopg2.extras.RealDictCursor
-)
-
-def get_conn():
-    conn = _pg_pool.getconn()
-    try:
-        with conn.cursor() as _c:
-            _c.execute("SET statement_timeout TO %s", (PG_STATEMENT_TIMEOUT_MS,))
-        return conn
-    except Exception:
-        # devolve a conexão ao pool e propaga o erro (NÃO recursione!)
-        try:
-            _pg_pool.putconn(conn)
-        finally:
-            pass
-        raise
-
-def put_conn(conn):
-    if conn:
-        _pg_pool.putconn(conn)
-        
 app = Flask(__name__)
 
 CARTEIRA_TO_PHONE = {
@@ -115,12 +82,19 @@ def favicon():
     return "", 204
 
 # --- CONFIG DB e META ---
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
+)
 VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "meu_token_secreto")
 DEFAULT_TOKEN = os.getenv("META_TOKEN", "")
 DEFAULT_PHONE_ID = os.getenv("PHONE_ID", "")
 DEFAULT_WABA_ID = os.getenv("WABA_ID", "")
 DEFAULT_AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 DEFAULT_AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 def ensure_tables():
     conn = get_conn()
@@ -172,8 +146,8 @@ def ensure_tables():
 
         conn.commit()
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 ensure_tables()
 
@@ -319,8 +293,8 @@ def listar_contatos():
         rows = cur.fetchall()
         return jsonify(rows)
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 # 🔎 Lista conversas (relatório)
 @app.route("/api/conversas", methods=["GET"])
@@ -416,8 +390,8 @@ def listar_conversas():
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 # 📜 Histórico com filtro por data_inicio, data_fim e phone_id
 @app.route("/api/conversas/<telefone>", methods=["GET"])
@@ -517,8 +491,8 @@ def historico_conversa(telefone):
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 # --------------------------------------------------
 # ✉️ Faz a leitura de imagens
@@ -574,8 +548,8 @@ def get_image_url_by_msgid(msg_id):
     except Exception as e:
         return jsonify({"ok": False, "erro": str(e)}), 500
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 # --------------------------------------------------
 # ✉️ Faz a reproducao de audios
@@ -634,8 +608,8 @@ def get_audio_by_msgid(msg_id):
     except Exception as e:
         return jsonify({"ok": False, "erro": str(e)}), 500
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 # --------------------------------------------------
 # ⚙️ ROTA: carregar metadados de mensagens "system" por msg_id
@@ -706,8 +680,8 @@ def get_system_by_msgid(msg_id):
     except Exception as e:
         return jsonify({"ok": False, "erro": str(e)}), 500
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 # --------------------------------------------------
 #  🙏 ROTA: carregar o emoji a partir do msg_id
@@ -737,8 +711,8 @@ def get_emoji_by_msgid(msg_id):
     except Exception as e:
         return jsonify({"ok": False, "erro": str(e)}), 500
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 # --------------------------------------------------
 # 📄 ROTA: obter documento (PDF/DOC/etc) a partir do msg_id
@@ -815,8 +789,8 @@ def get_document_by_msgid(msg_id):
     except Exception as e:
         return jsonify({"ok": False, "erro": str(e)}), 500
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 
 # --------------------------------------------------
@@ -887,8 +861,8 @@ def download_document_by_msgid(msg_id):
     except Exception as e:
         return jsonify({"ok": False, "erro": str(e)}), 500
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 
 # --------------------------------------------------
@@ -981,8 +955,8 @@ def enviar_mensagem(telefone):
         conn.rollback()
         return jsonify({"ok": False, "erro": f"Falha ao salvar no banco: {str(e)}"}), 500
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
     if not ok:
         return jsonify({"ok": False, "erro": resposta_raw, "status_code": r.status_code}), r.status_code
@@ -1433,7 +1407,7 @@ def tickets_claim():
         conn.rollback()
         return jsonify({"ok": False, "erro": f"claim falhou: {str(e)}"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
         
 @app.route("/api/tickets/minhas", methods=["GET"])
@@ -1544,7 +1518,7 @@ def tickets_minhas():
     except Exception as e:
         return jsonify({"ok": False, "erro": f"minhas falhou: {str(e)}"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/tickets/liberar", methods=["DELETE"])
 def tickets_liberar():
@@ -1578,7 +1552,7 @@ def tickets_liberar():
         conn.rollback()
         return jsonify({"ok": False, "erro": f"liberar falhou: {str(e)}"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/tickets/concluir", methods=["POST"])
 def tickets_concluir():
@@ -1623,7 +1597,7 @@ def tickets_concluir():
         conn.rollback()
         return jsonify({"ok": False, "erro": f"concluir falhou: {str(e)}"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 # 🔎 Monitoria: listar conversas_em_andamento com filtros
 @app.route("/api/monitoria/em_andamento", methods=["GET"])
 def monitoria_em_andamento():
@@ -1686,8 +1660,8 @@ def monitoria_em_andamento():
     except Exception as e:
         return jsonify({"ok": False, "erro": f"monitoria/em_andamento falhou: {str(e)}"}), 500
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 
 if __name__ == "__main__":

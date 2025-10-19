@@ -9,38 +9,6 @@ import psycopg2.extras
 import json
 import os
 import threading, time as time_mod
-from psycopg2.pool import ThreadedConnectionPool
-
-# --- DB Pool (global por processo) ---
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway")
-PG_POOL_MIN = int(os.getenv("PG_POOL_MIN", "2"))
-PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "20"))
-PG_STATEMENT_TIMEOUT_MS = int(os.getenv("PG_STATEMENT_TIMEOUT_MS", "30000"))
-
-_pg_pool = ThreadedConnectionPool(
-    minconn=PG_POOL_MIN,
-    maxconn=PG_POOL_MAX,
-    dsn=DATABASE_URL,
-    cursor_factory=psycopg2.extras.RealDictCursor
-)
-
-def get_conn():
-    conn = _pg_pool.getconn()
-    try:
-        with conn.cursor() as _c:
-            _c.execute("SET statement_timeout TO %s", (PG_STATEMENT_TIMEOUT_MS,))
-        return conn
-    except Exception:
-        # devolve a conexão ao pool e propaga o erro (NÃO recursione!)
-        try:
-            _pg_pool.putconn(conn)
-        finally:
-            pass
-        raise
-
-def put_conn(conn):
-    if conn:
-        _pg_pool.putconn(conn)
 
 def _bot_account_allowed(phone_id: str, waba_id: str|None) -> tuple[bool, str]:
     """
@@ -55,7 +23,7 @@ def _bot_account_allowed(phone_id: str, waba_id: str|None) -> tuple[bool, str]:
         if row:
             allowed = bool(row["enabled"])
             flow_file = row["flow_file"] or flow_file
-        cur; conn
+        cur.close(); conn.close()
     except Exception:
         pass
 
@@ -77,7 +45,14 @@ def _bot_account_allowed(phone_id: str, waba_id: str|None) -> tuple[bool, str]:
 app = Flask(__name__)
 CORS(app)
 
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
+)
 VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "meu_token_secreto")
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 def init_db():
     conn = get_conn()
@@ -236,8 +211,8 @@ def init_db():
     """)
 
     conn.commit()
-    cur
-    conn
+    cur.close()
+    conn.close()
 
 init_db()
 
@@ -268,8 +243,8 @@ def salvar_mensagem(remetente, mensagem, msg_id=None, nome=None, timestamp=None,
         (data_hora, remetente, mensagem, "in", nome, msg_id, phone_number_id, display_phone_number, json.dumps(raw) if raw else None)
     )
     conn.commit()
-    cur
-    conn
+    cur.close()
+    conn.close()
 
 def salvar_status(msg_id, recipient_id, status, raw, timestamp=None,
                   phone_number_id=None, display_phone_number=None):
@@ -284,8 +259,8 @@ def salvar_status(msg_id, recipient_id, status, raw, timestamp=None,
         (data_hora, msg_id, recipient_id, status, phone_number_id, display_phone_number, json.dumps(raw))
     )
     conn.commit()
-    cur
-    conn
+    cur.close()
+    conn.close()
 
 
 def conversa_humana_ativa(telefone: str, phone_id: str) -> bool:
@@ -302,7 +277,7 @@ def conversa_humana_ativa(telefone: str, phone_id: str) -> bool:
         """, (telefone, phone_id))
         return cur.fetchone() is not None
     finally:
-        cur; conn
+        cur.close(); conn.close()
         
 # =========================
 # Webhook Meta
@@ -381,7 +356,7 @@ def webhook():
                     """, (remetente,))
                     row = cur.fetchone()
                 finally:
-                    cur; conn
+                    cur.close(); conn.close()
 
                 if row and (row.get("assigned") or "") == "human":
                     continue
@@ -462,7 +437,7 @@ def cadastrar():
         print("❌ /api/cadastrar:", e)
         return jsonify({"ok": False, "erro": "erro ao cadastrar usuário"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/login", methods=["POST"])
 def login():
@@ -477,7 +452,7 @@ def login():
         cur.execute("SELECT id, nome, email, senha, ativo FROM usuarios WHERE email=%s", (email,))
         user = cur.fetchone()
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
     if not user or not check_password_hash(user["senha"], senha):
         return jsonify({"ok": False, "erro": "credenciais inválidas"}), 401
@@ -496,7 +471,7 @@ def listar_usuarios():
         print("❌ /api/usuarios [GET]:", e)
         return jsonify({"ok": False, "erro": "erro ao listar usuários"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/usuarios/<int:id>", methods=["PUT"])
 def editar_usuario(id):
@@ -518,7 +493,7 @@ def editar_usuario(id):
         print("❌ /api/usuarios/<id> [PUT]:", e)
         return jsonify({"ok": False, "erro": "erro ao editar usuário"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/usuarios/<int:id>", methods=["DELETE"])
 def excluir_usuario(id):
@@ -532,7 +507,7 @@ def excluir_usuario(id):
         print("❌ /api/usuarios/<id> [DELETE]:", e)
         return jsonify({"ok": False, "erro": "erro ao excluir usuário"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 # =========================
 # Status (último por mensagem)
@@ -556,7 +531,7 @@ def listar_status():
         print("❌ /api/status:", e)
         return jsonify({"ok": False, "erro": "erro ao buscar status"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 # =========================
 # Agentes
@@ -577,7 +552,7 @@ def get_agente(codigo: int):
         print("❌ /api/agentes/<codigo> GET:", e)
         return jsonify({"ok": False, "erro": "Erro ao buscar agente"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/agentes", methods=["POST"])
 def post_agente():
@@ -615,7 +590,7 @@ def post_agente():
         print("❌ /api/agentes POST:", e)
         return jsonify({"ok": False, "erro": "Erro ao cadastrar agente"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/agentes/<int:codigo>", methods=["PUT"])
 def put_agente(codigo: int):
@@ -647,7 +622,7 @@ def put_agente(codigo: int):
         print("❌ /api/agentes/<codigo> PUT:", e)
         return jsonify({"ok": False, "erro": "Erro ao editar agente"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 # =========================
 # Fila de Atendimento (agentes online)
@@ -688,7 +663,7 @@ def fila_online():
         print("❌ /api/fila/online:", e)
         return jsonify({"ok": False, "erro": "Erro ao entrar online"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/fila/offline", methods=["DELETE"])
 def fila_offline():
@@ -718,7 +693,7 @@ def fila_offline():
         print("❌ /api/fila/offline:", e)
         return jsonify({"ok": False, "erro": "Erro ao ficar offline"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/fila/status", methods=["GET"])
 def fila_status():
@@ -745,7 +720,7 @@ def fila_status():
         print("❌ /api/fila/status:", e)
         return jsonify({"ok": False, "erro": "Erro ao listar fila"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 # =========================
 # Fila de contatos NÃO ATRIBUÍDOS (para os novos KPIs)
@@ -973,7 +948,7 @@ def fila_pendentes():
         print("❌ /api/fila/pendentes:", e)
         return jsonify([])  # front tem fallback de UI
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/fila/pendentes_por_carteira", methods=["GET"])
 def fila_pendentes_por_carteira():
@@ -986,7 +961,7 @@ def fila_pendentes_por_carteira():
         print("❌ /api/fila/pendentes_por_carteira:", e)
         return jsonify([])  # front sabe lidar
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 # =========================
 # Envios (CRUD + ações)
@@ -1039,8 +1014,8 @@ def criar_envio():
         print("❌ Erro ao salvar envio:", e)
         return jsonify({"ok": False, "erro": "erro ao salvar envio"}), 500
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 def _row_to_iso(dt):
     return dt.isoformat() if dt else None
@@ -1124,7 +1099,7 @@ def listar_envios():
         print("❌ /api/envios [GET]:", e)
         return jsonify({"ok": False, "erro": "erro ao listar envios"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/envios/<int:envio_id>", methods=["GET"])
 def obter_envio(envio_id: int):
@@ -1180,7 +1155,7 @@ def obter_envio(envio_id: int):
         print("❌ /api/envios/<id> [GET]:", e)
         return jsonify({"ok": False, "erro": "erro ao obter envio"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/envios/<int:envio_id>", methods=["PUT"])
 def editar_envio(envio_id: int):
@@ -1214,7 +1189,7 @@ def editar_envio(envio_id: int):
         print("❌ /api/envios/<id> [PUT]:", e)
         return jsonify({"ok": False, "erro": "erro ao editar envio"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/envios/<int:envio_id>", methods=["DELETE"])
 def excluir_envio(envio_id: int):
@@ -1231,7 +1206,7 @@ def excluir_envio(envio_id: int):
         print("❌ /api/envios/<id> [DELETE]:", e)
         return jsonify({"ok": False, "erro": "erro ao excluir envio"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/envios/<int:envio_id>/pause", methods=["PATCH"])
 def pausar_envio(envio_id: int):
@@ -1246,7 +1221,7 @@ def pausar_envio(envio_id: int):
         print("❌ /api/envios/<id>/pause [PATCH]:", e)
         return jsonify({"ok": False, "erro": "erro ao pausar envio"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/envios/<int:envio_id>/resume", methods=["PATCH"])
 def retomar_envio(envio_id: int):
@@ -1261,7 +1236,7 @@ def retomar_envio(envio_id: int):
         print("❌ /api/envios/<id>/resume [PATCH]:", e)
         return jsonify({"ok": False, "erro": "erro ao retomar envio"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/envios/<int:envio_id>/cancel", methods=["PATCH"])
 def cancelar_envio(envio_id: int):
@@ -1282,7 +1257,7 @@ def cancelar_envio(envio_id: int):
         print("❌ /api/envios/<id>/cancel [PATCH]:", e)
         return jsonify({"ok": False, "erro": "erro ao cancelar envio"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 # =========================
 # Logout automático (novos endpoints)
@@ -1302,7 +1277,7 @@ def get_logout_config():
         print("❌ /api/supervisao/logout-config [GET]:", e)
         return jsonify({"enabled": False, "time": "18:00", "carteiras": []})
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/supervisao/logout-config", methods=["PUT"])
 def put_logout_config():
@@ -1328,7 +1303,7 @@ def put_logout_config():
         print("❌ /api/supervisao/logout-config [PUT]:", e)
         return jsonify({"ok": False, "erro": "erro ao salvar config"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/fila/forcar_logout", methods=["POST"])
 def forcar_logout():
@@ -1355,7 +1330,7 @@ def forcar_logout():
         print("❌ /api/fila/forcar_logout [POST]:", e)
         return jsonify({"ok": False, "erro": "erro ao forçar logout"}), 500
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 TZ = ZoneInfo("America/Sao_Paulo")
 
@@ -1445,8 +1420,8 @@ def _try_run_scheduled_logout():
         print("❌ scheduler logout:", e)
         return False, "erro", 0
     finally:
-        cur
-        conn
+        cur.close()
+        conn.close()
 
 
 def _scheduler_loop():

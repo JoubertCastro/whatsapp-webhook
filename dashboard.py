@@ -4,39 +4,15 @@ import psycopg2, psycopg2.extras, os
 from typing import Tuple, List, Any
 
 app = Flask(__name__, static_folder=".", static_url_path="")
+CORS(app)  # habilita CORS depois de criar o app
 
-from psycopg2.pool import ThreadedConnectionPool
-
-# --- DB Pool (global por processo) ---
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway")
-PG_POOL_MIN = int(os.getenv("PG_POOL_MIN", "2"))
-PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "20"))
-PG_STATEMENT_TIMEOUT_MS = int(os.getenv("PG_STATEMENT_TIMEOUT_MS", "30000"))
-
-_pg_pool = ThreadedConnectionPool(
-    minconn=PG_POOL_MIN,
-    maxconn=PG_POOL_MAX,
-    dsn=DATABASE_URL,
-    cursor_factory=psycopg2.extras.RealDictCursor
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
 )
 
 def get_conn():
-    conn = _pg_pool.getconn()
-    try:
-        with conn.cursor() as _c:
-            _c.execute("SET statement_timeout TO %s", (PG_STATEMENT_TIMEOUT_MS,))
-        return conn
-    except Exception:
-        # devolve a conexão ao pool e propaga o erro (NÃO recursione!)
-        try:
-            _pg_pool.putconn(conn)
-        finally:
-            pass
-        raise
-
-def put_conn(conn):
-    if conn:
-        _pg_pool.putconn(conn)
+    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 def parse_filters_for_sessions(args) -> Tuple[List[str], List[Any]]:
     conds, params = [], []
@@ -98,7 +74,7 @@ def resumo():
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchone())
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 
 @app.route("/api/dashboard/envios")
@@ -139,7 +115,7 @@ def envios():
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 # --- NOVO: resumo de atendimentos ---
 @app.route("/api/atendimentos/resumo")
@@ -257,7 +233,7 @@ def atend_resumo():
             "tmr_segundos": int(tmr or 0),
         })
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 # --- NOVO: motivos de conclusão (pizza) ---
 @app.route("/api/atendimentos/motivos")
@@ -300,7 +276,7 @@ def atend_motivos():
         cur.execute(sql, tuple(params))
         return jsonify(cur.fetchall())
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 
 # --- NOVO: séries diárias de in/out/concluídos ---
@@ -384,7 +360,7 @@ def atend_series():
 
         return jsonify({"mensagens": series_msg, "concluidos": series_conc})
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 # --- NOVO: hora a hora (concluídos por hora + inbound por hora) ---
 @app.route("/api/atendimentos/hora_hora")
@@ -485,7 +461,7 @@ def atend_hora_hora():
 
         return jsonify({"concluidos": concluidos, "inbound": inbound})
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 @app.route("/api/agentes")
 def listar_agentes():
@@ -517,7 +493,7 @@ def listar_agentes():
             cur.execute("SELECT codigo_do_agente, nome, carteira FROM agentes ORDER BY nome NULLS LAST, codigo_do_agente")
         return jsonify(cur.fetchall())
     finally:
-        cur; conn
+        cur.close(); conn.close()
 
 # ---------- Página do Dashboard ----------
 @app.route("/dashboard")
