@@ -77,14 +77,7 @@ def _bot_account_allowed(phone_id: str, waba_id: str|None) -> tuple[bool, str]:
 app = Flask(__name__)
 CORS(app)
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
-)
 VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "meu_token_secreto")
-
-def get_conn():
-    return get_conn()
 
 def init_db():
     conn = get_conn()

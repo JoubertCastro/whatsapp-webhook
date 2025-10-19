@@ -115,19 +115,12 @@ def favicon():
     return "", 204
 
 # --- CONFIG DB e META ---
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
-)
 VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "meu_token_secreto")
 DEFAULT_TOKEN = os.getenv("META_TOKEN", "")
 DEFAULT_PHONE_ID = os.getenv("PHONE_ID", "")
 DEFAULT_WABA_ID = os.getenv("WABA_ID", "")
 DEFAULT_AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 DEFAULT_AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
-
-def get_conn():
-    return get_conn()
 
 def ensure_tables():
     conn = get_conn()
