@@ -13,8 +13,8 @@ from psycopg2.pool import ThreadedConnectionPool
 
 # --- DB Pool (global por processo) ---
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway")
-PG_POOL_MIN = int(os.getenv("PG_POOL_MIN", "1"))
-PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "10"))
+PG_POOL_MIN = int(os.getenv("PG_POOL_MIN", "2"))
+PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "20"))
 PG_STATEMENT_TIMEOUT_MS = int(os.getenv("PG_STATEMENT_TIMEOUT_MS", "30000"))
 
 _pg_pool = ThreadedConnectionPool(
