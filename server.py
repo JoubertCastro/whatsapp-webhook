@@ -764,26 +764,26 @@ def _pendentes_base_sql(agregado=False):
                 ) rep ON TRUE
             ),
             cliente_msg AS (
-                SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
+                SELECT data_hora, remetente AS telefone,telefone_norm, phone_number_id AS phone_id,
                        direcao AS status, mensagem AS mensagem_final,msg_id
                 FROM mensagens
             ),
             conversas AS (
-                SELECT data_hora,
-                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
+                SELECT data_hora,telefone,
+                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone_norm,
                        phone_id, status, mensagem_final,''msg_id
                 FROM enviados
                 UNION
-                SELECT data_hora, telefone, phone_id, status, mensagem_final,msg_id
+                SELECT data_hora, telefone,telefone_norm, phone_id, status, mensagem_final,msg_id
                 FROM cliente_msg
                 UNION
-                SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
+                SELECT data_hora, remetente as telefone,telefone_norm,phone_id,status,conteudo as mensagem_final,''msg_id
 				from mensagens_avulsas where status not in ('erro')
                             ),
             msg_id AS (
-                SELECT remetente, msg_id
+                SELECT remetente,telefone_norm, msg_id
                 FROM (
-                    SELECT data_hora, remetente, msg_id,
+                    SELECT data_hora, remetente,telefone_norm, msg_id,
                         row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS indice
                     FROM mensagens
                 ) t
@@ -796,7 +796,7 @@ def _pendentes_base_sql(agregado=False):
                 FROM conversas a
                 INNER JOIN msg_id b
                   ON a.telefone = b.remetente
-                  OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
+                  OR a.telefone = b.telefone_norm
             ),
 			fila_contatos as (
             SELECT r.telefone,
@@ -865,26 +865,26 @@ def _pendentes_base_sql(agregado=False):
                 ) rep ON TRUE
             ),
             cliente_msg AS (
-                SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
+                SELECT data_hora, remetente AS telefone,telefone_norm, phone_number_id AS phone_id,
                        direcao AS status, mensagem AS mensagem_final,msg_id
                 FROM mensagens
             ),
             conversas AS (
-                SELECT data_hora,
-                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
+                SELECT data_hora,telefone,
+                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone_norm,
                        phone_id, status, mensagem_final,''msg_id
                 FROM enviados
                 UNION
-                SELECT data_hora, telefone, phone_id, status, mensagem_final,msg_id
+                SELECT data_hora, telefone,telefone_norm, phone_id, status, mensagem_final,msg_id
                 FROM cliente_msg
                 UNION
-                SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
+                SELECT data_hora, remetente as telefone,telefone_norm,phone_id,status,conteudo as mensagem_final,''msg_id
 				from mensagens_avulsas where status not in ('erro')
                             ),
             msg_id AS (
-                SELECT remetente, msg_id
+                SELECT remetente,telefone_norm, msg_id
                 FROM (
-                    SELECT data_hora, remetente, msg_id,
+                    SELECT data_hora, remetente,telefone_norm, msg_id,
                         row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS indice
                     FROM mensagens
                 ) t
@@ -897,7 +897,7 @@ def _pendentes_base_sql(agregado=False):
                 FROM conversas a
                 INNER JOIN msg_id b
                   ON a.telefone = b.remetente
-                  OR a.telefone = regexp_replace(b.remetente, '(?<=^55\d{2})9', '', 'g')
+                  OR a.telefone = b.telefone_norm
             ),
 			fila_contatos as (
             SELECT r.telefone,
