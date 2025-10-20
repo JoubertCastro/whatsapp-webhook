@@ -797,7 +797,15 @@ def _pendentes_base_sql(agregado=False):
                 INNER JOIN msg_id b
                   ON a.telefone = b.remetente
                   OR a.telefone = b.telefone_norm
-            ),
+            ),last_in AS (
+                SELECT
+                  remetente AS telefone,
+                  phone_number_id AS phone_id,
+                  MAX(CASE WHEN direcao<>'in'
+                           THEN data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                           ELSE data_hora END) AS last_in
+                FROM mensagens
+                GROUP BY 1,2),
 			fila_contatos as (
             SELECT r.telefone,
                    (SELECT COALESCE(nome, r.telefone) FROM mensagens m WHERE m.remetente = r.telefone ORDER BY case when status = 'in'then m.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else m.data_hora end DESC LIMIT 1) AS nome_exibicao,
@@ -818,10 +826,15 @@ def _pendentes_base_sql(agregado=False):
                    case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end as data_hora,
                    r.status
             FROM ranked r
+				LEFT JOIN tickets_bloqueados tb
+              	ON tb.telefone = r.telefone AND tb.phone_id = r.phone_id
+            	LEFT JOIN last_in li
+              	ON li.telefone = r.telefone AND li.phone_id = r.phone_id
             WHERE r.rn = 1
             and case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end  >= (now()AT TIME ZONE 'America/Sao_Paulo' - interval '1 days' )
+			AND (tb.telefone IS NULL OR (li.last_in IS NOT NULL AND li.last_in > (tb.bloqueado_at AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'UTC'))
 			ORDER BY case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end DESC
-			)
+            )
 			
 			SELECT fc.telefone, fc.carteira, fc.data_hora as created_at
 				FROM fila_contatos fc
@@ -898,7 +911,15 @@ def _pendentes_base_sql(agregado=False):
                 INNER JOIN msg_id b
                   ON a.telefone = b.remetente
                   OR a.telefone = b.telefone_norm
-            ),
+            ),last_in AS (
+                SELECT
+                  remetente AS telefone,
+                  phone_number_id AS phone_id,
+                  MAX(CASE WHEN direcao<>'in'
+                           THEN data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
+                           ELSE data_hora END) AS last_in
+                FROM mensagens
+                GROUP BY 1,2),
 			fila_contatos as (
             SELECT r.telefone,
                    (SELECT COALESCE(nome, r.telefone) FROM mensagens m WHERE m.remetente = r.telefone ORDER BY case when status = 'in'then m.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else m.data_hora end DESC LIMIT 1) AS nome_exibicao,
@@ -919,10 +940,15 @@ def _pendentes_base_sql(agregado=False):
                    case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end as data_hora,
                    r.status
             FROM ranked r
+				LEFT JOIN tickets_bloqueados tb
+              	ON tb.telefone = r.telefone AND tb.phone_id = r.phone_id
+            	LEFT JOIN last_in li
+              	ON li.telefone = r.telefone AND li.phone_id = r.phone_id
             WHERE r.rn = 1
             and case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end  >= (now()AT TIME ZONE 'America/Sao_Paulo' - interval '1 days' )
+			AND (tb.telefone IS NULL OR (li.last_in IS NOT NULL AND li.last_in > (tb.bloqueado_at AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'UTC'))
 			ORDER BY case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end DESC
-			)
+            )
 			
             SELECT fc.carteira, COUNT(*)::INT AS total
 				FROM fila_contatos fc
@@ -931,8 +957,9 @@ def _pendentes_base_sql(agregado=False):
 			               AND cea.ended_at IS NULL
 			WHERE 1=1
 				AND cea.id IS NULL
-          GROUP BY fc.carteira
+			GROUP BY fc.carteira
           ORDER BY total DESC;
+
         """
 
 @app.route("/api/fila/pendentes", methods=["GET"])

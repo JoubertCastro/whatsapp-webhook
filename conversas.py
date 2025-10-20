@@ -1080,76 +1080,74 @@ def tickets_claim():
 
             # 2.2) validar se o contato está elegível na carteira (mesma lógica base, porém filtrando o remetente)
             sql_check = r"""
-                WITH dados AS (
-                    SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
-                           ea.telefone, ea.status, ea.conteudo,
-                           phone_id, string_to_array(ea.conteudo, ',') AS vars,
-                           (envios.template::json ->> 'bodyText') AS body_text
-                    FROM envios_analitico ea
-                    JOIN envios ON ea.nome_disparo = envios.nome_disparo
-                                AND ea.grupo_trabalho = envios.grupo_trabalho
-                ),
-                enviados AS (
-                    SELECT d.data_hora, d.telefone, d.phone_id, d.status,
-                           COALESCE(rep.txt, d.body_text) AS mensagem_final
-                    FROM dados d
-                    LEFT JOIN LATERAL (
-                        WITH RECURSIVE rep(i, txt) AS (
-                            SELECT 0, d.body_text
-                            UNION ALL
-                            SELECT i+1,
-                                   regexp_replace(
-                                       txt,
-                                       '\{\{' || (i+1) || '\}\}',
-                                       COALESCE(btrim(d.vars[i+1]), ''),
-                                       'g'
-                                   )
-                            FROM rep
-                            WHERE i < COALESCE(array_length(d.vars, 1), 0)
-                        )
-                        SELECT txt FROM rep ORDER BY i DESC LIMIT 1
-                    ) rep ON TRUE
-                ),
-                cliente_msg AS (
-                    SELECT data_hora, remetente AS telefone, phone_number_id AS phone_id,
-                           direcao AS status, mensagem AS mensagem_final, msg_id
+            WITH dados AS (
+                SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
+                       ea.telefone, ea.status, ea.conteudo,
+                       phone_id, string_to_array(ea.conteudo, ',') AS vars,
+                       (envios.template::json ->> 'bodyText') AS body_text
+                FROM envios_analitico ea
+                JOIN envios ON ea.nome_disparo = envios.nome_disparo
+                  AND ea.grupo_trabalho = envios.grupo_trabalho
+            ),
+            enviados AS (
+                SELECT d.data_hora, d.telefone, d.phone_id, d.status,
+                       COALESCE(rep.txt, d.body_text) AS mensagem_final
+                FROM dados d
+                LEFT JOIN LATERAL (
+                    WITH RECURSIVE rep(i, txt) AS (
+                        SELECT 0, d.body_text
+                        UNION ALL
+                        SELECT i+1,
+                            regexp_replace(
+                                txt,
+                                '\{\{' || (i+1) || '\}\}',
+                                COALESCE(btrim(d.vars[i+1]), ''),
+                                'g'
+                            )
+                        FROM rep
+                        WHERE i < COALESCE(array_length(d.vars, 1), 0)
+                    )
+                    SELECT txt FROM rep ORDER BY i DESC LIMIT 1
+                ) rep ON TRUE
+            ),
+            cliente_msg AS (
+                SELECT data_hora, remetente AS telefone,telefone_norm, phone_number_id AS phone_id,
+                       direcao AS status, mensagem AS mensagem_final,msg_id
+                FROM mensagens
+            ),
+            conversas AS (
+                SELECT data_hora,telefone,
+                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone_norm,
+                       phone_id, status, mensagem_final,''msg_id
+                FROM enviados
+                UNION
+                SELECT data_hora, telefone,telefone_norm, phone_id, status, mensagem_final,msg_id
+                FROM cliente_msg
+                UNION
+                SELECT data_hora, remetente as telefone,telefone_norm,phone_id,status,conteudo as mensagem_final,''msg_id
+				from mensagens_avulsas where status not in ('erro')
+                            ),
+            msg_id AS (
+                SELECT remetente,telefone_norm, msg_id
+                FROM (
+                    SELECT data_hora, remetente,telefone_norm, msg_id,
+                        row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS indice
                     FROM mensagens
-                ),
-                conversas AS (
-                    SELECT data_hora,
-                           regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone,
-                           phone_id, status, mensagem_final, ''::text AS msg_id
-                    FROM enviados
-                    UNION
-                    SELECT data_hora, telefone, phone_id, status, mensagem_final, msg_id
-                    FROM cliente_msg
-                    UNION
-                    SELECT data_hora, remetente AS telefone, phone_id, status, conteudo AS mensagem_final, ''::text AS msg_id
-                    FROM mensagens_avulsas WHERE status <> 'erro'
-                ),
-                msg_id AS (
-                    SELECT remetente, msg_id FROM (
-                        SELECT data_hora, remetente, msg_id,
-                               row_number() OVER (PARTITION BY remetente ORDER BY data_hora DESC) AS idx
-                        FROM mensagens
-                    ) t WHERE idx = 1
-                ),
-                ranked AS (
-                    SELECT a.telefone, a.phone_id, a.status, a.mensagem_final, a.data_hora,
-                           b.msg_id,
-                           row_number() OVER (
-                              PARTITION BY a.telefone,a.phone_id
-                              ORDER BY CASE WHEN a.status='in'
-                                            THEN a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
-                                            ELSE a.data_hora END DESC
-                           ) AS rn
-                    FROM conversas a
-                    INNER JOIN msg_id b
-                      ON a.telefone = b.remetente
-                      OR a.telefone = regexp_replace(b.remetente, '(?<=^55\\d{2})9', '', 'g')
-                ), last_in AS (
+                ) t
+                WHERE indice = 1
+            ),
+            ranked AS (
+                SELECT a.telefone,b.telefone_norm, a.phone_id, a.status, a.mensagem_final, a.data_hora,
+                       b.msg_id,
+                       row_number() OVER (PARTITION BY a.telefone,a.phone_id ORDER BY case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end DESC) AS rn
+                FROM conversas a
+                INNER JOIN msg_id b
+                  ON a.telefone = b.remetente
+                  OR a.telefone = b.telefone_norm
+            ),
+				last_in AS (
                     SELECT
-                      regexp_replace(remetente, '(?<=^55\\d{2})9', '', 'g') AS telefone,
+                      telefone_norm AS telefone,
                       phone_number_id AS phone_id,
                       MAX(CASE WHEN direcao<>'in'
                                THEN data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
@@ -1177,8 +1175,8 @@ def tickets_claim():
                   ON li.telefone = r.telefone AND li.phone_id = r.phone_id
                 WHERE r.rn = 1
                   AND r.phone_id = %s
-                  AND (regexp_replace(r.telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s, '(?<=^55\\d{2})9','')
-                  OR regexp_replace(r.telefone, '(?<=^55\\d{2})9','') = %s)
+                  AND (r.telefone = %s
+                  OR r.telefone_norm = %s)
                   AND (CASE WHEN r.status='in'
                             THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
                             ELSE r.data_hora END) >= now() - interval '1 day'
