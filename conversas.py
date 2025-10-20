@@ -14,7 +14,7 @@ CARTEIRA_TO_PHONE = {
     "ConnectZap": "828473960349364",
     "Recovery PJ": "727586317113885",
     "Recovery PF": "864779140046932",
-    "Mercado Pago Cobrança": "821562937700669",
+    "Mercado Pago Cobrança": "873637622491517",
     "DivZero": "779797401888141",
     "Arc4U": "829210283602406",
     "Serasa": "713021321904495",
