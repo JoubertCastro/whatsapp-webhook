@@ -255,7 +255,7 @@ def gerar_url_presign():
                 "Key": unique_name,
                 "ContentType": "application/pdf"
             },
-            ExpiresIn=30
+            ExpiresIn=60
         )
     except Exception as e:
         return jsonify({"ok": False, "erro": f"Falha ao gerar URL pré-assinada: {str(e)}"}), 500
