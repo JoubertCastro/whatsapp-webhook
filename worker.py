@@ -7,7 +7,7 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 
 #DATABASE_URL = os.getenv("DATABASE_URL")
-GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v23.0")
+GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v24.0")
 DATABASE_URL = os.getenv("DATABASE_URL","postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway")
 
 # Tuning via env

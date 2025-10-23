@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, make_response,Response
+from flask import Flask, request, jsonify, make_response, Response
 from flask_cors import CORS
 import psycopg2, psycopg2.extras, os, requests, json
 from datetime import datetime
@@ -7,6 +7,8 @@ from botocore.client import Config
 import base64
 import psycopg2.errors
 import re
+import uuid
+from typing import Optional, Tuple, List, Dict, Any
 
 app = Flask(__name__)
 
@@ -14,14 +16,15 @@ CARTEIRA_TO_PHONE = {
     "ConnectZap": "828473960349364",
     "Recovery PJ": "727586317113885",
     "Recovery PF": "864779140046932",
+    "Recovery PF": "802977069563598",
     "Mercado Pago Cobrança": "873637622491517",
+    "Mercado Pago Cobrança": "821562937700669",
     "DivZero": "779797401888141",
     "Arc4U": "829210283602406",
     "Serasa": "713021321904495",
     "Mercado Pago Vendas": "803535039503723",
     "Banco PAN": "805610009301153",
 }
-
 
 ALLOWED_MOTIVOS_CONCLUSAO = [
     "Realizou negociação",
@@ -40,7 +43,7 @@ CORS(
     app,
     resources={r"/api/*": {
         "origins": cors_origins,
-        "methods": ["GET", "POST", "DELETE","PUT", "OPTIONS"],
+        "methods": ["GET", "POST", "DELETE", "PUT", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "expose_headers": ["Content-Type"]
     }},
@@ -85,8 +88,16 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://postgres:MHKRBuSTXcoAfNhZNErtPnCaLySHHlPd@postgres.railway.internal:5432/railway"
 )
-VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "meu_token_secreto")
+
+VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "")
+
+# ====== TOKENS COM FAILOVER ======
 DEFAULT_TOKEN = os.getenv("META_TOKEN", "")
+BACKUP_TOKEN = os.getenv("META_TOKEN_2", "")
+TOKEN_CANDIDATES: List[str] = [t for t in [DEFAULT_TOKEN, BACKUP_TOKEN] if t]
+if not TOKEN_CANDIDATES:
+    print("⚠️ Nenhum token META configurado (META_TOKEN / META_TOKEN_2).")
+
 DEFAULT_PHONE_ID = os.getenv("PHONE_ID", "")
 DEFAULT_WABA_ID = os.getenv("WABA_ID", "")
 DEFAULT_AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
@@ -141,15 +152,12 @@ def ensure_tables():
         );
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS ix_tickets_bloqueados_bloq ON tickets_bloqueados(bloqueado_at DESC);")
-
-
         conn.commit()
     finally:
         cur.close()
         conn.close()
 
 ensure_tables()
-
 
 # -----------------------------
 # CONFIGURAÇÃO S3
@@ -167,11 +175,68 @@ s3_client = boto3.client(
     config=Config(signature_version='s3v4')
 )
 
-# -----------------------------
-# ROTA PARA GERAR URL PRÉ-ASSINADA PARA UPLOAD DE PDF
-# -----------------------------
-import uuid
+# ===========================
+# HELPERS DE TOKEN/GRAPH
+# ===========================
+def _is_auth_error(resp: Optional[requests.Response]) -> bool:
+    if resp is None:
+        return False
+    if resp.status_code in (401, 403):
+        return True
+    try:
+        data = resp.json()
+        code = (data.get("error") or {}).get("code")
+        return code == 190  # Invalid OAuth 2.0 Access Token
+    except Exception:
+        return False
 
+def _build_token_candidates(explicit_token: Optional[str]) -> List[str]:
+    """Se o usuário enviar um token explicitamente, usa só ele; senão usa a lista global."""
+    if explicit_token:
+        return [explicit_token]
+    return TOKEN_CANDIDATES
+
+def graph_get_with_fallback(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 12,
+                            token_candidates: Optional[List[str]] = None) -> Tuple[Dict[str, Any], str]:
+    last_exc: Optional[Exception] = None
+    candidates = token_candidates or TOKEN_CANDIDATES
+    for tok in candidates:
+        try:
+            q = dict(params or {})
+            q["access_token"] = tok
+            r = requests.get(url, params=q, timeout=timeout)
+            if _is_auth_error(r):
+                last_exc = requests.HTTPError(f"Auth error {r.status_code}", response=r)
+                continue
+            r.raise_for_status()
+            return r.json(), tok
+        except Exception as e:
+            # se não for auth error, propaga caso seja o último candidato
+            last_exc = e
+            continue
+    raise RuntimeError(f"Graph GET falhou: {last_exc}")
+
+def graph_post_messages_with_fallback(phone_id: str, payload: Dict[str, Any], timeout: int = 12,
+                                      token_candidates: Optional[List[str]] = None) -> Tuple[requests.Response, str]:
+    url = f"https://graph.facebook.com/v24.0/{phone_id}/messages"
+    last_resp: Optional[requests.Response] = None
+    candidates = token_candidates or TOKEN_CANDIDATES
+    for tok in candidates:
+        try:
+            r = requests.post(url, headers={"Authorization": f"Bearer {tok}"}, json=payload, timeout=timeout)
+            if _is_auth_error(r):
+                last_resp = r
+                continue
+            return r, tok
+        except Exception:
+            continue
+    if last_resp is not None:
+        return last_resp, candidates[-1] if candidates else ""
+    raise RuntimeError("Falha ao chamar Graph API (sem resposta).")
+
+# -----------------------------
+# ROTA: gerar URL PRÉ-ASSINADA PARA UPLOAD DE PDF
+# -----------------------------
 @app.route("/api/upload/pdf", methods=["POST"])
 def gerar_url_presign():
     data = request.get_json(silent=True) or {}
@@ -180,7 +245,6 @@ def gerar_url_presign():
     if not filename.lower().endswith(".pdf"):
         return jsonify({"ok": False, "erro": "Somente arquivos PDF são permitidos"}), 400
 
-    # 🔹 Gera nome único no bucket preservando o original
     unique_name = f"{uuid.uuid4().hex}_{filename}"
 
     try:
@@ -191,7 +255,7 @@ def gerar_url_presign():
                 "Key": unique_name,
                 "ContentType": "application/pdf"
             },
-            ExpiresIn=30  # 30 segundos
+            ExpiresIn=30
         )
     except Exception as e:
         return jsonify({"ok": False, "erro": f"Falha ao gerar URL pré-assinada: {str(e)}"}), 500
@@ -202,7 +266,6 @@ def gerar_url_presign():
         "file_url": f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{unique_name}",
         "original_filename": filename
     })
-
 
 # 🔹 Lista contatos únicos (última mensagem por contato)
 @app.route("/api/conversas/contatos", methods=["GET"])
@@ -256,7 +319,7 @@ def listar_contatos():
                 FROM cliente_msg
                 UNION
                 SELECT data_hora, remetente as telefone,telefone_norm,phone_id,status,conteudo as mensagem_final,''msg_id
-				from mensagens_avulsas where status not in ('erro')
+                from mensagens_avulsas where status not in ('erro')
                             ),
             msg_id AS (
                 SELECT remetente,telefone_norm, msg_id
@@ -286,7 +349,7 @@ def listar_contatos():
             FROM ranked r
             WHERE r.rn = 1
             ORDER BY case when status = 'in'then r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else r.data_hora end DESC
-			;
+            ;
         """
         cur.execute(sql)
         rows = cur.fetchall()
@@ -352,7 +415,7 @@ def listar_conversas():
                 FROM cliente_msg
                 UNION
                 SELECT data_hora, remetente as telefone,phone_id,status,conteudo as mensagem_final,''msg_id
-				from mensagens_avulsas where status not in ('erro')
+                from mensagens_avulsas where status not in ('erro')
             ),
             tb_final as (
             SELECT case when status = 'in'then a.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo' else a.data_hora end as data_hora,
@@ -397,7 +460,7 @@ def listar_conversas():
 def historico_conversa(telefone):
     data_inicio = request.args.get("data_inicio")
     data_fim = request.args.get("data_fim")
-    filtro_phone_id = request.args.get("phone_id")  # ✅ agora usado sempre
+    filtro_phone_id = request.args.get("phone_id")
 
     conn = get_conn()
     cur = conn.cursor()
@@ -462,8 +525,6 @@ def historico_conversa(telefone):
                 WHERE a.telefone = %s
         """
         params = [telefone]
-
-        # ✅ se vier phone_id, aplica filtro
         if filtro_phone_id:
             sql += " AND a.phone_id = %s"
             params.append(filtro_phone_id)
@@ -474,7 +535,6 @@ def historico_conversa(telefone):
             FROM tb_final a
         """
 
-        # filtros opcionais de data
         if data_inicio and data_fim:
             sql += " WHERE a.data_hora::date BETWEEN %s AND %s"
             params.extend([data_inicio, data_fim])
@@ -496,7 +556,6 @@ def historico_conversa(telefone):
 # --------------------------------------------------
 # ✉️ Faz a leitura de imagens
 # --------------------------------------------------
-
 @app.route("/api/conversas/image/<msg_id>", methods=["GET"])
 def get_image_url_by_msgid(msg_id):
     if not msg_id:
@@ -505,7 +564,6 @@ def get_image_url_by_msgid(msg_id):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # 1. Buscar image_id no banco
         cur.execute(
             "SELECT raw->'image'->>'id' AS image_id FROM mensagens WHERE msg_id = %s LIMIT 1",
             (msg_id,)
@@ -516,32 +574,24 @@ def get_image_url_by_msgid(msg_id):
 
         image_id = row["image_id"]
 
-        # 2. Buscar URL temporária no Graph
-        token = DEFAULT_TOKEN
+        # Graph com fallback de token
         graph_url = f"https://graph.facebook.com/v24.0/{image_id}"
-        meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
-        meta_resp.raise_for_status()
-        data = meta_resp.json()
+        data, used_token = graph_get_with_fallback(graph_url, timeout=10)
 
         lookaside_url = data.get("url")
         mime_type = data.get("mime_type", "image/jpeg")
-
         if not lookaside_url:
             return jsonify({"ok": False, "erro": "URL não encontrada no Graph"}), 500
 
-        # 3. Baixar a imagem usando o lookaside_url + Authorization
         img_resp = requests.get(
             lookaside_url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {used_token}"},
             timeout=15
         )
         img_resp.raise_for_status()
 
-        # 4. Converter para Base64 (formato data URI)
         b64_data = base64.b64encode(img_resp.content).decode("utf-8")
         data_uri = f"data:{mime_type};base64,{b64_data}"
-
-        # 5. Retornar JSON para o frontend
         return jsonify({"ok": True, "data_uri": data_uri})
 
     except Exception as e:
@@ -549,10 +599,6 @@ def get_image_url_by_msgid(msg_id):
     finally:
         cur.close()
         conn.close()
-
-# --------------------------------------------------
-# ✉️ Faz a reproducao de audios
-# --------------------------------------------------
 
 # --------------------------------------------------
 # 🎙️ ROTA: obter áudio (em base64) a partir do msg_id
@@ -565,7 +611,6 @@ def get_audio_by_msgid(msg_id):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # 1. Buscar audio_id no banco
         cur.execute(
             "SELECT raw->'audio'->>'id' AS audio_id FROM mensagens WHERE msg_id = %s LIMIT 1",
             (msg_id,)
@@ -576,32 +621,23 @@ def get_audio_by_msgid(msg_id):
 
         audio_id = row["audio_id"]
 
-        # 2. Buscar URL temporária no Graph
-        token = DEFAULT_TOKEN
         graph_url = f"https://graph.facebook.com/v24.0/{audio_id}"
-        meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
-        meta_resp.raise_for_status()
-        data = meta_resp.json()
+        data, used_token = graph_get_with_fallback(graph_url, timeout=10)
 
         lookaside_url = data.get("url")
-        mime_type = data.get("mime_type", "audio/ogg")  # 👈 padrão do WhatsApp é OGG/opus
-
+        mime_type = data.get("mime_type", "audio/ogg")
         if not lookaside_url:
             return jsonify({"ok": False, "erro": "URL não encontrada no Graph"}), 500
 
-        # 3. Baixar o áudio com token
         audio_resp = requests.get(
             lookaside_url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {used_token}"},
             timeout=15
         )
         audio_resp.raise_for_status()
 
-        # 4. Converter para Base64 (formato data URI)
         b64_data = base64.b64encode(audio_resp.content).decode("utf-8")
         data_uri = f"data:{mime_type};base64,{b64_data}"
-
-        # 5. Retornar JSON para o frontend
         return jsonify({"ok": True, "data_uri": data_uri})
 
     except Exception as e:
@@ -615,20 +651,6 @@ def get_audio_by_msgid(msg_id):
 # --------------------------------------------------
 @app.route("/api/conversas/system/<msg_id>", methods=["GET"])
 def get_system_by_msgid(msg_id):
-    """
-    Retorna metadados de mensagens do tipo 'system' (ex.: user_changed_number).
-    Estrutura de retorno:
-      {
-        ok: True,
-        type: "user_changed_number",
-        body: "User A changed from 553898245103 to 553898664673",
-        wa_id: "553898664673",          # novo número (quando aplicável)
-        old_wa_id: "553898245103",      # número antigo (quando aplicável)
-        from: "553898245103",           # alias de old_wa_id (compat)
-        phone_id: "...",
-        data_hora: "2025-02-12T13:37:00-03:00"
-      }
-    """
     if not msg_id:
         return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
 
@@ -654,9 +676,7 @@ def get_system_by_msgid(msg_id):
         if not row:
             return jsonify({"ok": False, "erro": "msg_id não encontrado"}), 404
 
-        # Garante que é de fato uma mensagem 'system'
         if not (row.get("system_type") or row.get("body") or row.get("new_wa_id")):
-            # Opcional: verifica o tipo bruto da mensagem
             cur.execute("SELECT raw->>'type' AS msg_type FROM mensagens WHERE msg_id = %s", (msg_id,))
             trow = cur.fetchone()
             if not trow or (trow.get("msg_type") or "").lower() != "system":
@@ -669,7 +689,7 @@ def get_system_by_msgid(msg_id):
             "body": row.get("body"),
             "wa_id": row.get("new_wa_id"),
             "old_wa_id": old_wa_id,
-            "from": old_wa_id,  # alias para compatibilidade
+            "from": old_wa_id,
             "phone_id": row.get("phone_id"),
             "data_hora": row["data_hora"].isoformat() if row.get("data_hora") else None,
         }
@@ -693,7 +713,6 @@ def get_emoji_by_msgid(msg_id):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # 1. Buscar emoji no banco (campo reaction->emoji)
         cur.execute(
             "SELECT raw->'reaction'->>'emoji' AS emoji FROM mensagens WHERE msg_id = %s LIMIT 1",
             (msg_id,)
@@ -703,8 +722,6 @@ def get_emoji_by_msgid(msg_id):
             return jsonify({"ok": False, "erro": "emoji não encontrado"}), 404
 
         emoji = row["emoji"]
-
-        # 2. Retornar direto no JSON (sem base64, sem Graph)
         return jsonify({"ok": True, "emoji": emoji})
 
     except Exception as e:
@@ -718,17 +735,12 @@ def get_emoji_by_msgid(msg_id):
 # --------------------------------------------------
 @app.route("/api/conversas/document/<msg_id>", methods=["GET"])
 def get_document_by_msgid(msg_id):
-    """
-    Retorna o documento como data URI (base64), junto com metadados.
-    Use /download para stream quando o arquivo for grande.
-    """
     if not msg_id:
         return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
 
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # 1) Busca no payload cru da mensagem o ID do documento + nome de arquivo
         cur.execute(
             """
             SELECT
@@ -751,30 +763,23 @@ def get_document_by_msgid(msg_id):
         doc_id   = row["doc_id"]
         filename = row.get("filename") or "arquivo"
 
-        # 2) Consulta o Graph pra pegar a URL lookaside e o mime_type
-        token     = DEFAULT_TOKEN
         graph_url = f"https://graph.facebook.com/v24.0/{doc_id}"
-        meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
-        meta_resp.raise_for_status()
-        data      = meta_resp.json()
+        data, used_token = graph_get_with_fallback(graph_url, timeout=10)
 
         lookaside_url = data.get("url")
         mime_type     = data.get("mime_type", "application/octet-stream")
-        file_size     = data.get("file_size")  # pode vir None
-
+        file_size     = data.get("file_size")
         if not lookaside_url:
             return jsonify({"ok": False, "erro": "URL do documento não encontrada no Graph"}), 500
 
-        # 3) Baixa o binário usando Authorization (o lookaside exige Bearer)
         bin_resp = requests.get(
             lookaside_url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {used_token}"},
             timeout=30
         )
         bin_resp.raise_for_status()
         content = bin_resp.content
 
-        # 4) Converte para base64 (data URI)
         b64_data = base64.b64encode(content).decode("utf-8")
         data_uri = f"data:{mime_type};base64,{b64_data}"
 
@@ -791,16 +796,11 @@ def get_document_by_msgid(msg_id):
         cur.close()
         conn.close()
 
-
 # --------------------------------------------------
 # 📄 ROTA: download/stream do documento por msg_id
 # --------------------------------------------------
 @app.route("/api/conversas/document/<msg_id>/download", methods=["GET"])
 def download_document_by_msgid(msg_id):
-    """
-    Faz stream do arquivo com Content-Type e Content-Disposition.
-    Útil para PDFs/arquivos grandes (evita payloads enormes em JSON).
-    """
     if not msg_id:
         return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
 
@@ -829,11 +829,8 @@ def download_document_by_msgid(msg_id):
         doc_id   = row["doc_id"]
         filename = row.get("filename") or "arquivo"
 
-        token     = DEFAULT_TOKEN
         graph_url = f"https://graph.facebook.com/v24.0/{doc_id}"
-        meta_resp = requests.get(graph_url, params={"access_token": token}, timeout=10)
-        meta_resp.raise_for_status()
-        data      = meta_resp.json()
+        data, used_token = graph_get_with_fallback(graph_url, timeout=10)
 
         lookaside_url = data.get("url")
         mime_type     = data.get("mime_type", "application/octet-stream")
@@ -842,13 +839,12 @@ def download_document_by_msgid(msg_id):
 
         bin_resp = requests.get(
             lookaside_url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {used_token}"},
             stream=True,
             timeout=30
         )
         bin_resp.raise_for_status()
 
-        # Stream para o cliente
         return Response(
             bin_resp.iter_content(chunk_size=8192),
             content_type=mime_type,
@@ -863,42 +859,35 @@ def download_document_by_msgid(msg_id):
         cur.close()
         conn.close()
 
-
 # --------------------------------------------------
-# ✉️ Envia mensagem avulsa (texto ou PDF)
+# ✉️ Envia mensagem avulsa (texto ou PDF) com fallback de token
 # --------------------------------------------------
 @app.route("/api/conversas/<telefone>", methods=["POST"])
 def enviar_mensagem(telefone):
     data = request.get_json(silent=True) or {}
     texto = (data.get("texto") or "").strip()
 
-    token = data.get("token") or DEFAULT_TOKEN
+    explicit_token = data.get("token") or None  # se vier token, usa só ele
     phone_id = data.get("phone_id") or DEFAULT_PHONE_ID
     waba_id = data.get("waba_id") or DEFAULT_WABA_ID
     msg_id = data.get("msg_id")  # opcional
 
     pdf_url = data.get("file_url")
-    filename = data.get("original_filename")  # 🔹 Nome original do arquivo
+    filename = data.get("original_filename")
 
-    if not token or not phone_id:
-        return jsonify({"ok": False, "erro": "token ou phone_id não configurados"}), 400
+    if not phone_id:
+        return jsonify({"ok": False, "erro": "phone_id não configurado"}), 400
 
-    url = f"https://graph.facebook.com/v24.0/{phone_id}/messages"
-
+    # payload
     if pdf_url and filename:
-        # Se for PDF
         payload = {
             "messaging_product": "whatsapp",
             "to": telefone,
             "type": "document",
-            "document": {
-                "link": pdf_url,
-                "filename": filename
-            }
+            "document": {"link": pdf_url, "filename": filename}
         }
         conteudo = f"📎 PDF: {filename}\n🔗 {pdf_url}"
     else:
-        # Se for texto
         if not texto:
             return jsonify({"ok": False, "erro": "texto é obrigatório"}), 400
         payload = {
@@ -911,10 +900,10 @@ def enviar_mensagem(telefone):
             payload["context"] = {"message_id": str(msg_id)}
         conteudo = texto
 
-    headers = {"Authorization": f"Bearer {token}"}
-
+    # POST com fallback (ou token explícito)
+    candidates = _build_token_candidates(explicit_token)
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=12)
+        r, used_token = graph_post_messages_with_fallback(phone_id, payload, timeout=12, token_candidates=candidates)
     except Exception as e:
         return jsonify({"ok": False, "erro": f"Falha na requisição para Graph API: {str(e)}"}), 500
 
@@ -922,7 +911,7 @@ def enviar_mensagem(telefone):
     status = "enviado" if ok else "erro"
 
     retorno_msg_id = None
-    resposta_raw = None
+    resposta_raw: Any = None
     try:
         resposta_raw = r.json()
         if isinstance(resposta_raw, dict):
@@ -967,7 +956,6 @@ def _normalize_remetente(p: str) -> str:
     d = re.sub(r"\D", "", str(p))
     if not d.startswith("55"):
         d = "55" + d
-
     head, rest = d[:4], d[4:]
     if len(rest) == 9 and rest.startswith("9"):
         d = head + rest[1:]
@@ -975,19 +963,16 @@ def _normalize_remetente(p: str) -> str:
         d = head + rest
     return d
 
-
 @app.route("/api/tickets/claim", methods=["POST"])
 def tickets_claim():
     data = request.get_json(silent=True) or {}
     codigo   = data.get("codigo_do_agente")
     carteira = (data.get("carteira") or "").strip()
 
-    # Opcional: pedido direcionado
     req_remetente = _normalize_remetente(data.get("remetente") or "")
     req_phone_id  = (data.get("phone_id") or "").strip()
     prioridade    = bool(data.get("prioridade"))
 
-    # validação básica
     if not isinstance(codigo, int) or not carteira:
         return jsonify({"ok": False, "erro": "codigo_do_agente (int) e carteira são obrigatórios"}), 400
 
@@ -995,13 +980,11 @@ def tickets_claim():
     if not phone_id:
         return jsonify({"ok": False, "erro": "carteira desconhecida"}), 400
 
-    # se for direcionado e não veio phone_id, usar o da carteira
     if req_remetente and not req_phone_id:
         req_phone_id = phone_id
 
     conn = get_conn(); cur = conn.cursor()
     try:
-        # 1) agente precisa estar online na carteira
         cur.execute("""
             SELECT 1 FROM fila_de_atendimento
              WHERE codigo_do_agente=%s AND carteira=%s
@@ -1009,7 +992,6 @@ def tickets_claim():
         if not cur.fetchone():
             return jsonify({"ok": False, "erro": "agente está offline nesta carteira"}), 409
 
-        # 2) faxina: encerra conversas ativas de agentes que saíram da fila
         cur.execute("""
             UPDATE conversas_em_andamento t
                SET ended_at = NOW()
@@ -1022,7 +1004,6 @@ def tickets_claim():
         """)
         conn.commit()
 
-        # função util: checar limite atual do agente na carteira
         def _check_limit_or_409():
             try:
                 cur.execute("SELECT limit_per_agent FROM tickets_limit_config WHERE carteira=%s", (carteira,))
@@ -1050,9 +1031,8 @@ def tickets_claim():
                     }), 409
             return None
 
-        # ===== FLUXO DIRECIONADO (com remetente especificado) =====
+        # ===== FLUXO DIRECIONADO =====
         if req_remetente:
-            # 2.1) já está em atendimento?
             cur.execute("""
                 SELECT codigo_do_agente, nome_agente
                   FROM conversas_em_andamento
@@ -1066,7 +1046,6 @@ def tickets_claim():
             """, (req_remetente, req_remetente, req_phone_id))
             row = cur.fetchone()
             if row:
-                # se é o próprio agente, apenas retorna o ticket (não conta como novo para o limite)
                 if int(row["codigo_do_agente"]) == int(codigo):
                     cur.execute("""
                         WITH msgs AS (
@@ -1094,7 +1073,6 @@ def tickets_claim():
                             "data_hora": last.get("data_hora").isoformat() if last.get("data_hora") else None
                         }
                     })
-                # outro agente está atendendo -> informe quem é
                 return jsonify({
                     "ok": False,
                     "erro": "Conversa já está em atendimento por outro agente",
@@ -1104,12 +1082,10 @@ def tickets_claim():
                     }
                 }), 409
 
-            # 2.2) se não está em atendimento, checa o limite (agora vale)
             limited = _check_limit_or_409()
             if limited:
                 return limited
 
-            # 2.3) validar elegibilidade do contato na carteira
             sql_check = r"""
             WITH dados AS (
                 SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
@@ -1225,7 +1201,6 @@ def tickets_claim():
             if not cand:
                 return jsonify({"ok": False, "erro": "Contato não está na fila desta carteira"}), 404
 
-            # 2.4) reservar para este agente
             try:
                 cur.execute("""
                     INSERT INTO conversas_em_andamento
@@ -1251,7 +1226,6 @@ def tickets_claim():
                 conn.rollback()
             except psycopg2.errors.UniqueViolation:
                 conn.rollback()
-                # corrida: alguém pegou agora; informe quem é
                 cur.execute("""
                     SELECT codigo_do_agente, nome_agente
                       FROM conversas_em_andamento
@@ -1277,13 +1251,11 @@ def tickets_claim():
 
             return jsonify({"ok": False, "erro": "Não foi possível reservar"}), 409
 
-        # ===== FLUXO NORMAL (sem remetente) =====
-        # 3) checa limite ANTES de buscar candidatos
+        # ===== FLUXO NORMAL =====
         limited = _check_limit_or_409()
         if limited:
             return limited
 
-        # 4) buscar candidatos da carteira
         sql = r"""
             WITH dados AS (
                 SELECT ea.nome_disparo, ea.grupo_trabalho, ea.data_hora,
@@ -1396,7 +1368,6 @@ def tickets_claim():
         cur.execute(sql, (phone_id,))
         candidatos = cur.fetchall()
 
-        # 5) tenta reservar um candidato de cada vez
         for c in candidatos:
             try:
                 cur.execute("""
@@ -1423,7 +1394,6 @@ def tickets_claim():
                 conn.rollback()
             except psycopg2.errors.UniqueViolation:
                 conn.rollback()
-                # corrida: informar quem está atendendo
                 cur.execute("""
                     SELECT codigo_do_agente, nome_agente
                       FROM conversas_em_andamento
@@ -1445,7 +1415,6 @@ def tickets_claim():
                             "nome": holder["nome_agente"]
                         }
                     }), 409
-                # se não achou, segue tentando o próximo candidato
                 continue
 
         return jsonify({"ok": False, "erro": "Sem conversas disponíveis nesta carteira"}), 404
@@ -1456,7 +1425,6 @@ def tickets_claim():
     finally:
         cur.close(); conn.close()
 
-        
 @app.route("/api/tickets/minhas", methods=["GET"])
 def tickets_minhas():
     try:
@@ -1602,7 +1570,6 @@ def get_tickets_limit():
         cur.close(); conn.close()
 
 #nova função 
-
 @app.route("/api/supervisao/tickets-limit", methods=["PUT"])
 def put_tickets_limit():
     data = request.get_json(silent=True) or {}
@@ -1705,7 +1672,6 @@ def tickets_concluir():
         DO UPDATE SET bloqueado_at = EXCLUDED.bloqueado_at, motivo = EXCLUDED.motivo
         """, (telefone, phone_id, motivo))
 
-
         conn.commit()
         return jsonify({"ok": True})
     except Exception as e:
@@ -1713,13 +1679,14 @@ def tickets_concluir():
         return jsonify({"ok": False, "erro": f"concluir falhou: {str(e)}"}), 500
     finally:
         cur.close(); conn.close()
+
 # 🔎 Monitoria: listar conversas_em_andamento com filtros
 @app.route("/api/monitoria/em_andamento", methods=["GET"])
 def monitoria_em_andamento():
     carteira     = (request.args.get("carteira") or "").strip()
     nome_agente  = (request.args.get("nome_agente") or "").strip()
     telefone     = (request.args.get("telefone") or "").strip()
-    status       = (request.args.get("status") or "todas").strip().lower()  # ativas | finalizadas | todas
+    status       = (request.args.get("status") or "todas").strip().lower()
     try:
         limit = int(request.args.get("limit", "100"))
         if limit <= 0 or limit > 1000:
@@ -1753,7 +1720,6 @@ def monitoria_em_andamento():
             params.append(f"%{nome_agente}%")
 
         if telefone:
-            # permite buscar parte do número (prefixo/sufixo)
             sql += " AND telefone ILIKE %s"
             params.append(f"%{telefone}%")
 
@@ -1761,7 +1727,6 @@ def monitoria_em_andamento():
             sql += " AND ended_at IS NULL"
         elif status == "finalizadas":
             sql += " AND ended_at IS NOT NULL"
-        # 'todas' -> sem cláusula extra
 
         sql += """
             ORDER BY (ended_at IS NULL) DESC, started_at DESC
@@ -1777,7 +1742,6 @@ def monitoria_em_andamento():
     finally:
         cur.close()
         conn.close()
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 6000))
