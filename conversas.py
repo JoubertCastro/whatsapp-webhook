@@ -12,18 +12,16 @@ from typing import Optional, Tuple, List, Dict, Any
 
 app = Flask(__name__)
 
-CARTEIRA_TO_PHONE = {
-    "ConnectZap": "828473960349364",
-    "Recovery PJ": "727586317113885",
-    "Recovery PF": "864779140046932",
-    "Recovery PF": "802977069563598",
-    "Mercado Pago Cobrança": "873637622491517",
-    "Mercado Pago Cobrança": "821562937700669",
-    "DivZero": "779797401888141",
-    "Arc4U": "829210283602406",
-    "Serasa": "713021321904495",
-    "Mercado Pago Vendas": "803535039503723",
-    "Banco PAN": "805610009301153",
+CARTEIRA_TO_PHONES = {
+    "ConnectZap": ["828473960349364"],
+    "Recovery PJ": ["727586317113885"],
+    "Recovery PF": ["864779140046932", "802977069563598"],
+    "Mercado Pago Cobrança": ["873637622491517", "821562937700669"],
+    "DivZero": ["779797401888141"],
+    "Arc4U": ["829210283602406"],
+    "Serasa": ["713021321904495"],
+    "Mercado Pago Vendas": ["803535039503723"],
+    "Banco PAN": ["805610009301153"],
 }
 
 ALLOWED_MOTIVOS_CONCLUSAO = [
@@ -1059,9 +1057,10 @@ def tickets_claim():
     if not isinstance(codigo, int) or not carteira:
         return jsonify({"ok": False, "erro": "codigo_do_agente (int) e carteira são obrigatórios"}), 400
 
-    phone_id = CARTEIRA_TO_PHONE.get(carteira)
+    phone_id = CARTEIRA_TO_PHONES.get(carteira)
     if not phone_id:
         return jsonify({"ok": False, "erro": "carteira desconhecida"}), 400
+
 
     if req_remetente and not req_phone_id:
         req_phone_id = phone_id
@@ -1123,7 +1122,7 @@ def tickets_claim():
                         regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s,'(?<=^55\\d{2})9','')
                         OR regexp_replace(telefone, '(?<=^55\\d{2})9','') = %s
                        )
-                   AND phone_id=%s
+                   AND phone_id = ANY(%s)
                    AND ended_at IS NULL
                  LIMIT 1
             """, (req_remetente, req_remetente, req_phone_id))
@@ -1269,7 +1268,7 @@ def tickets_claim():
               LEFT JOIN last_in li
                 ON li.telefone = r.telefone AND li.phone_id = r.phone_id
              WHERE r.rn = 1
-               AND r.phone_id = %s
+               AND r.phone_id = ANY(%s)
                AND (r.telefone = %s OR r.telefone_norm = %s)
                AND (CASE WHEN r.status='in'
                          THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
@@ -1439,7 +1438,7 @@ def tickets_claim():
               LEFT JOIN last_in li
                 ON li.telefone = r.telefone AND li.phone_id = r.phone_id
              WHERE r.rn = 1
-               AND r.phone_id = %s
+               AND r.phone_id = ANY(%s)
                AND (CASE WHEN r.status='in'
                          THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
                          ELSE r.data_hora END) >= now() - interval '1 day'
