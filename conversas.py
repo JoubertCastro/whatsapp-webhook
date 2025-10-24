@@ -16,9 +16,9 @@ CARTEIRA_TO_PHONE = {
     "ConnectZap": "828473960349364",
     "Recovery PJ": "727586317113885",
     "Recovery PF": "864779140046932",
-    #"Recovery PF 1": "802977069563598",
+    "Recovery PF": "802977069563598",
     "Mercado Pago Cobrança": "873637622491517",
-    #"Mercado Pago Cobrança": "821562937700669",
+    "Mercado Pago Cobrança": "821562937700669",
     "DivZero": "779797401888141",
     "Arc4U": "829210283602406",
     "Serasa": "713021321904495",
@@ -91,12 +91,16 @@ DATABASE_URL = os.getenv(
 
 VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "")
 
-# ====== TOKENS COM FAILOVER ======
-DEFAULT_TOKEN = os.getenv("META_TOKEN", "")
-BACKUP_TOKEN = os.getenv("META_TOKEN_2", "")
-TOKEN_CANDIDATES: List[str] = [t for t in [DEFAULT_TOKEN, BACKUP_TOKEN] if t]
-if not TOKEN_CANDIDATES:
-    print("⚠️ Nenhum token META configurado (META_TOKEN / META_TOKEN_2).")
+# ====== TOKENS E ROTEAMENTO POR PHONE_ID ======
+PRIMARY_TOKEN = os.getenv("META_TOKEN", "")
+SECONDARY_TOKEN = os.getenv("META_TOKEN_2", "")
+
+# Estes phone_ids usam META_TOKEN (PRIMARY_TOKEN).
+PRIMARY_PHONE_IDS = {
+    "864779140046932",
+    "873637622491517",
+    "828473960349364",
+}
 
 DEFAULT_PHONE_ID = os.getenv("PHONE_ID", "")
 DEFAULT_WABA_ID = os.getenv("WABA_ID", "")
@@ -178,61 +182,32 @@ s3_client = boto3.client(
 # ===========================
 # HELPERS DE TOKEN/GRAPH
 # ===========================
-def _is_auth_error(resp: Optional[requests.Response]) -> bool:
-    if resp is None:
-        return False
-    if resp.status_code in (401, 403):
-        return True
-    try:
-        data = resp.json()
-        code = (data.get("error") or {}).get("code")
-        return code == 190  # Invalid OAuth 2.0 Access Token
-    except Exception:
-        return False
-
-def _build_token_candidates(explicit_token: Optional[str]) -> List[str]:
-    """Se o usuário enviar um token explicitamente, usa só ele; senão usa a lista global."""
+def pick_token_for_phone(phone_id: str, explicit_token: Optional[str] = None) -> str:
+    """
+    - Se 'explicit_token' foi enviado no body -> usa ele.
+    - Caso contrário:
+        * phone_id em PRIMARY_PHONE_IDS -> PRIMARY_TOKEN
+        * senão -> SECONDARY_TOKEN
+    """
     if explicit_token:
-        return [explicit_token]
-    return TOKEN_CANDIDATES
+        return explicit_token
+    return PRIMARY_TOKEN if phone_id in PRIMARY_PHONE_IDS else SECONDARY_TOKEN
 
-def graph_get_with_fallback(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 12,
-                            token_candidates: Optional[List[str]] = None) -> Tuple[Dict[str, Any], str]:
-    last_exc: Optional[Exception] = None
-    candidates = token_candidates or TOKEN_CANDIDATES
-    for tok in candidates:
-        try:
-            q = dict(params or {})
-            q["access_token"] = tok
-            r = requests.get(url, params=q, timeout=timeout)
-            if _is_auth_error(r):
-                last_exc = requests.HTTPError(f"Auth error {r.status_code}", response=r)
-                continue
-            r.raise_for_status()
-            return r.json(), tok
-        except Exception as e:
-            # se não for auth error, propaga caso seja o último candidato
-            last_exc = e
-            continue
-    raise RuntimeError(f"Graph GET falhou: {last_exc}")
+def graph_get(url: str, phone_id: str, params: Optional[Dict[str, Any]] = None, timeout: int = 12,
+              explicit_token: Optional[str] = None) -> Tuple[Dict[str, Any], str]:
+    tok = pick_token_for_phone(phone_id, explicit_token)
+    q = dict(params or {})
+    q["access_token"] = tok
+    r = requests.get(url, params=q, timeout=timeout)
+    r.raise_for_status()
+    return r.json(), tok
 
-def graph_post_messages_with_fallback(phone_id: str, payload: Dict[str, Any], timeout: int = 12,
-                                      token_candidates: Optional[List[str]] = None) -> Tuple[requests.Response, str]:
+def graph_post_messages(phone_id: str, payload: Dict[str, Any], timeout: int = 12,
+                        explicit_token: Optional[str] = None) -> Tuple[requests.Response, str]:
+    tok = pick_token_for_phone(phone_id, explicit_token)
     url = f"https://graph.facebook.com/v24.0/{phone_id}/messages"
-    last_resp: Optional[requests.Response] = None
-    candidates = token_candidates or TOKEN_CANDIDATES
-    for tok in candidates:
-        try:
-            r = requests.post(url, headers={"Authorization": f"Bearer {tok}"}, json=payload, timeout=timeout)
-            if _is_auth_error(r):
-                last_resp = r
-                continue
-            return r, tok
-        except Exception:
-            continue
-    if last_resp is not None:
-        return last_resp, candidates[-1] if candidates else ""
-    raise RuntimeError("Falha ao chamar Graph API (sem resposta).")
+    r = requests.post(url, headers={"Authorization": f"Bearer {tok}"}, json=payload, timeout=timeout)
+    return r, tok
 
 # -----------------------------
 # ROTA: gerar URL PRÉ-ASSINADA PARA UPLOAD DE PDF
@@ -423,7 +398,7 @@ def listar_conversas():
                    a.status, a.mensagem_final, a.msg_id
             FROM conversas a
             )
-            select 
+            select
             data_hora,
             a.telefone,
             a.phone_id,
@@ -503,7 +478,7 @@ def historico_conversa(telefone):
             ),
             conversas AS (
                  SELECT data_hora,
-                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
+                       regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone,
                        phone_id, status, mensagem_final, '' msg_id
                 FROM enviados
                 UNION
@@ -564,8 +539,9 @@ def get_image_url_by_msgid(msg_id):
     conn = get_conn()
     cur = conn.cursor()
     try:
+        # Agora também pegamos o phone_number_id para rotear o token corretamente
         cur.execute(
-            "SELECT raw->'image'->>'id' AS image_id FROM mensagens WHERE msg_id = %s LIMIT 1",
+            "SELECT raw->'image'->>'id' AS image_id, phone_number_id AS phone_id FROM mensagens WHERE msg_id = %s LIMIT 1",
             (msg_id,)
         )
         row = cur.fetchone()
@@ -573,10 +549,10 @@ def get_image_url_by_msgid(msg_id):
             return jsonify({"ok": False, "erro": "image_id não encontrado"}), 404
 
         image_id = row["image_id"]
+        phone_id = row.get("phone_id") or ""
 
-        # Graph com fallback de token
         graph_url = f"https://graph.facebook.com/v24.0/{image_id}"
-        data, used_token = graph_get_with_fallback(graph_url, timeout=10)
+        data, used_token = graph_get(graph_url, phone_id, timeout=10)
 
         lookaside_url = data.get("url")
         mime_type = data.get("mime_type", "image/jpeg")
@@ -612,7 +588,7 @@ def get_audio_by_msgid(msg_id):
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT raw->'audio'->>'id' AS audio_id FROM mensagens WHERE msg_id = %s LIMIT 1",
+            "SELECT raw->'audio'->>'id' AS audio_id, phone_number_id AS phone_id FROM mensagens WHERE msg_id = %s LIMIT 1",
             (msg_id,)
         )
         row = cur.fetchone()
@@ -620,9 +596,10 @@ def get_audio_by_msgid(msg_id):
             return jsonify({"ok": False, "erro": "audio_id não encontrado"}), 404
 
         audio_id = row["audio_id"]
+        phone_id = row.get("phone_id") or ""
 
         graph_url = f"https://graph.facebook.com/v24.0/{audio_id}"
-        data, used_token = graph_get_with_fallback(graph_url, timeout=10)
+        data, used_token = graph_get(graph_url, phone_id, timeout=10)
 
         lookaside_url = data.get("url")
         mime_type = data.get("mime_type", "audio/ogg")
@@ -749,7 +726,8 @@ def get_document_by_msgid(msg_id):
                 raw->'document'->>'filename',
                 raw->'document'->>'file_name',
                 'arquivo'
-              ) AS filename
+              ) AS filename,
+              phone_number_id AS phone_id
             FROM mensagens
             WHERE msg_id = %s
             LIMIT 1
@@ -762,9 +740,10 @@ def get_document_by_msgid(msg_id):
 
         doc_id   = row["doc_id"]
         filename = row.get("filename") or "arquivo"
+        phone_id = row.get("phone_id") or ""
 
         graph_url = f"https://graph.facebook.com/v24.0/{doc_id}"
-        data, used_token = graph_get_with_fallback(graph_url, timeout=10)
+        data, used_token = graph_get(graph_url, phone_id, timeout=10)
 
         lookaside_url = data.get("url")
         mime_type     = data.get("mime_type", "application/octet-stream")
@@ -815,7 +794,8 @@ def download_document_by_msgid(msg_id):
                 raw->'document'->>'filename',
                 raw->'document'->>'file_name',
                 'arquivo'
-              ) AS filename
+              ) AS filename,
+              phone_number_id AS phone_id
             FROM mensagens
             WHERE msg_id = %s
             LIMIT 1
@@ -828,9 +808,10 @@ def download_document_by_msgid(msg_id):
 
         doc_id   = row["doc_id"]
         filename = row.get("filename") or "arquivo"
+        phone_id = row.get("phone_id") or ""
 
         graph_url = f"https://graph.facebook.com/v24.0/{doc_id}"
-        data, used_token = graph_get_with_fallback(graph_url, timeout=10)
+        data, used_token = graph_get(graph_url, phone_id, timeout=10)
 
         lookaside_url = data.get("url")
         mime_type     = data.get("mime_type", "application/octet-stream")
@@ -860,17 +841,17 @@ def download_document_by_msgid(msg_id):
         conn.close()
 
 # --------------------------------------------------
-# ✉️ Envia mensagem avulsa (texto ou PDF) com fallback de token
+# ✉️ Envia mensagem avulsa (texto ou PDF) roteando token por phone_id
 # --------------------------------------------------
 @app.route("/api/conversas/<telefone>", methods=["POST"])
 def enviar_mensagem(telefone):
     data = request.get_json(silent=True) or {}
     texto = (data.get("texto") or "").strip()
 
-    explicit_token = data.get("token") or None  # se vier token, usa só ele
+    explicit_token = data.get("token") or None
     phone_id = data.get("phone_id") or DEFAULT_PHONE_ID
     waba_id = data.get("waba_id") or DEFAULT_WABA_ID
-    msg_id = data.get("msg_id")  # opcional
+    msg_id = data.get("msg_id")
 
     pdf_url = data.get("file_url")
     filename = data.get("original_filename")
@@ -900,10 +881,9 @@ def enviar_mensagem(telefone):
             payload["context"] = {"message_id": str(msg_id)}
         conteudo = texto
 
-    # POST com fallback (ou token explícito)
-    candidates = _build_token_candidates(explicit_token)
+    # POST com roteamento de token por phone_id (ou token explícito)
     try:
-        r, used_token = graph_post_messages_with_fallback(phone_id, payload, timeout=12, token_candidates=candidates)
+        r, used_token = graph_post_messages(phone_id, payload, timeout=12, explicit_token=explicit_token)
     except Exception as e:
         return jsonify({"ok": False, "erro": f"Falha na requisição para Graph API: {str(e)}"}), 500
 
@@ -1125,7 +1105,7 @@ def tickets_claim():
             ),
             conversas AS (
                 SELECT data_hora, telefone,
-                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone_norm,
+                       regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone_norm,
                        phone_id, status, mensagem_final, ''::text AS msg_id
                   FROM enviados
                 UNION
@@ -1569,7 +1549,7 @@ def get_tickets_limit():
     finally:
         cur.close(); conn.close()
 
-#nova função 
+#nova função
 @app.route("/api/supervisao/tickets-limit", methods=["PUT"])
 def put_tickets_limit():
     data = request.get_json(silent=True) or {}
