@@ -45,7 +45,7 @@ CORS(
         "origins": cors_origins,
         "methods": ["GET", "POST", "DELETE", "PUT", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
-        "expose_headers": ["Content-Type"]
+        "expose_headers": ["Content-Type", "Content-Disposition"]  # <- expõe Content-Disposition
     }},
     supports_credentials=False
 )
@@ -382,7 +382,7 @@ def listar_conversas():
             ),
             conversas AS (
                  SELECT data_hora,
-                       regexp_replace(telefone, '(?<=^55\d{2})9', '', 'g') AS telefone,
+                       regexp_replace(telefone, '(?<=^55\\d{2})9', '', 'g') AS telefone,
                        phone_id, status, mensagem_final,''msg_id
                 FROM enviados
                 UNION
@@ -529,7 +529,7 @@ def historico_conversa(telefone):
         conn.close()
 
 # --------------------------------------------------
-# ✉️ Faz a leitura de imagens
+# ✉️ Faz a leitura de imagens (base64)
 # --------------------------------------------------
 @app.route("/api/conversas/image/<msg_id>", methods=["GET"])
 def get_image_url_by_msgid(msg_id):
@@ -577,7 +577,59 @@ def get_image_url_by_msgid(msg_id):
         conn.close()
 
 # --------------------------------------------------
-# 🎙️ ROTA: obter áudio (em base64) a partir do msg_id
+# 🖼️ Download/stream da imagem (Plano B)
+# --------------------------------------------------
+@app.route("/api/conversas/image/<msg_id>/download", methods=["GET"])
+def download_image_by_msgid(msg_id):
+    if not msg_id:
+        return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT raw->'image'->>'id' AS image_id, phone_number_id AS phone_id FROM mensagens WHERE msg_id = %s LIMIT 1",
+            (msg_id,)
+        )
+        row = cur.fetchone()
+        if not row or not row.get("image_id"):
+            return jsonify({"ok": False, "erro": "image_id não encontrado"}), 404
+
+        image_id = row["image_id"]
+        phone_id = row.get("phone_id") or ""
+
+        graph_url = f"https://graph.facebook.com/v24.0/{image_id}"
+        data, used_token = graph_get(graph_url, phone_id, timeout=10)
+
+        lookaside_url = data.get("url")
+        mime_type = data.get("mime_type", "image/jpeg")
+        if not lookaside_url:
+            return jsonify({"ok": False, "erro": "URL não encontrada no Graph"}), 500
+
+        img_resp = requests.get(
+            lookaside_url,
+            headers={"Authorization": f"Bearer {used_token}"},
+            stream=True,
+            timeout=30
+        )
+        img_resp.raise_for_status()
+
+        return Response(
+            img_resp.iter_content(chunk_size=8192),
+            content_type=mime_type,
+            headers={
+                "Content-Disposition": 'inline; filename="imagem.jpg"',
+                "Cache-Control": "no-store"
+            }
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+# --------------------------------------------------
+# 🎙️ ROTA: obter áudio (base64) a partir do msg_id
 # --------------------------------------------------
 @app.route("/api/conversas/audio/<msg_id>", methods=["GET"])
 def get_audio_by_msgid(msg_id):
@@ -617,6 +669,58 @@ def get_audio_by_msgid(msg_id):
         data_uri = f"data:{mime_type};base64,{b64_data}"
         return jsonify({"ok": True, "data_uri": data_uri})
 
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+# --------------------------------------------------
+# 🔊 Download/stream do áudio (Plano B)
+# --------------------------------------------------
+@app.route("/api/conversas/audio/<msg_id>/download", methods=["GET"])
+def download_audio_by_msgid(msg_id):
+    if not msg_id:
+        return jsonify({"ok": False, "erro": "msg_id é obrigatório"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT raw->'audio'->>'id' AS audio_id, phone_number_id AS phone_id FROM mensagens WHERE msg_id = %s LIMIT 1",
+            (msg_id,)
+        )
+        row = cur.fetchone()
+        if not row or not row.get("audio_id"):
+            return jsonify({"ok": False, "erro": "audio_id não encontrado"}), 404
+
+        audio_id = row["audio_id"]
+        phone_id = row.get("phone_id") or ""
+
+        graph_url = f"https://graph.facebook.com/v24.0/{audio_id}"
+        data, used_token = graph_get(graph_url, phone_id, timeout=10)
+
+        lookaside_url = data.get("url")
+        mime_type = data.get("mime_type", "audio/ogg")
+        if not lookaside_url:
+            return jsonify({"ok": False, "erro": "URL não encontrada no Graph"}), 500
+
+        audio_resp = requests.get(
+            lookaside_url,
+            headers={"Authorization": f"Bearer {used_token}"},
+            stream=True,
+            timeout=30
+        )
+        audio_resp.raise_for_status()
+
+        return Response(
+            audio_resp.iter_content(chunk_size=8192),
+            content_type=mime_type,
+            headers={
+                "Content-Disposition": 'inline; filename="audio.ogg"',
+                "Cache-Control": "no-store"
+            }
+        )
     except Exception as e:
         return jsonify({"ok": False, "erro": str(e)}), 500
     finally:
@@ -881,7 +985,6 @@ def enviar_mensagem(telefone):
             payload["context"] = {"message_id": str(msg_id)}
         conteudo = texto
 
-    # POST com roteamento de token por phone_id (ou token explícito)
     try:
         r, used_token = graph_post_messages(phone_id, payload, timeout=12, explicit_token=explicit_token)
     except Exception as e:
@@ -1013,7 +1116,7 @@ def tickets_claim():
 
         # ===== FLUXO DIRECIONADO =====
         if req_remetente:
-            cur.execute("""
+            cur.execute(r"""
                 SELECT codigo_do_agente, nome_agente
                   FROM conversas_em_andamento
                  WHERE (
