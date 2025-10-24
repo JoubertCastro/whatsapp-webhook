@@ -171,13 +171,23 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
 BUCKET_NAME = os.getenv("AWS_BUCKET_NAME", "connectzap")
 
+#s3_client = boto3.client(
+#    "s3",
+#    region_name=AWS_REGION,
+#    aws_access_key_id=AWS_ACCESS_KEY_ID,
+#    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+#    config=Config(signature_version='s3v4')
+#)
+
 s3_client = boto3.client(
     "s3",
     region_name=AWS_REGION,
     aws_access_key_id=AWS_ACCESS_KEY_ID,
     aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-    config=Config(signature_version='s3v4')
+    endpoint_url=f"https://s3.{AWS_REGION}.amazonaws.com",
+    config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"})
 )
+
 
 # ===========================
 # HELPERS DE TOKEN/GRAPH
@@ -216,31 +226,26 @@ def graph_post_messages(phone_id: str, payload: Dict[str, Any], timeout: int = 1
 def gerar_url_presign():
     data = request.get_json(silent=True) or {}
     filename = (data.get("filename") or "").strip()
-
     if not filename.lower().endswith(".pdf"):
         return jsonify({"ok": False, "erro": "Somente arquivos PDF são permitidos"}), 400
 
     unique_name = f"{uuid.uuid4().hex}_{filename}"
-
     try:
         presigned_url = s3_client.generate_presigned_url(
             "put_object",
             Params={
                 "Bucket": BUCKET_NAME,
                 "Key": unique_name,
-                "ContentType": "application/pdf"
+                "ContentType": "application/pdf",
             },
-            ExpiresIn=60
+            ExpiresIn=300,  # um pouco mais de tempo
         )
     except Exception as e:
         return jsonify({"ok": False, "erro": f"Falha ao gerar URL pré-assinada: {str(e)}"}), 500
 
-    return jsonify({
-        "ok": True,
-        "upload_url": presigned_url,
-        "file_url": f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{unique_name}",
-        "original_filename": filename
-    })
+    # sempre devolva o file_url regional também
+    file_url = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{unique_name}"
+    return jsonify({"ok": True, "upload_url": presigned_url, "file_url": file_url, "original_filename": filename})
 
 # 🔹 Lista contatos únicos (última mensagem por contato)
 @app.route("/api/conversas/contatos", methods=["GET"])
