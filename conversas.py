@@ -1513,6 +1513,32 @@ def tickets_claim():
     finally:
         cur.close(); conn.close()
 
+@app.route("/api/tickets/contagem_por_agente", methods=["GET"])
+def tickets_contagem_por_agente():
+    carteira = (request.args.get("carteira") or "").strip()
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        # conta tickets ativos direto na tabela leve
+        sql = """
+          SELECT
+            codigo_do_agente,
+            carteira,
+            COUNT(*)::int AS qtd
+          FROM conversas_em_andamento
+          WHERE ended_at IS NULL
+          {}
+          GROUP BY 1,2
+        """.format("AND carteira=%s" if carteira else "")
+        cur.execute(sql, (carteira,) if carteira else ())
+        rows = cur.fetchall()
+        mapa = {f"{r['codigo_do_agente']}-{r['carteira']}": r['qtd'] for r in rows}
+        return jsonify({"ok": True, "mapa": mapa})
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
+    finally:
+        cur.close(); conn.close()
+
+
 @app.route("/api/tickets/minhas", methods=["GET"])
 def tickets_minhas():
     try:
