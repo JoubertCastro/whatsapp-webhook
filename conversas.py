@@ -1567,7 +1567,7 @@ def tickets_contagem_por_agente():
             codigo_do_agente,
             carteira,
             COUNT(*)::int AS qtd,
-            MIN(Parado)Tempo_inativo
+            EXTRACT(EPOCH FROM MIN(parado))::int AS tempo_inativo_seconds
             from conversas
             where 1=1
               {}
