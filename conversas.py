@@ -1078,11 +1078,11 @@ def tickets_claim():
     req_remetente = _normalize_remetente(data.get("remetente") or "")
     raw_pid = data.get("phone_id")
     if isinstance(raw_pid, (list, tuple)):
-        req_phone_ids = [str(x).strip() for x in raw_pid if str(x).strip()]
+        req_phone_id = [str(x).strip() for x in raw_pid if str(x).strip()]
     elif raw_pid:
-        req_phone_ids = [str(raw_pid).strip()]
+        req_phone_id = [str(raw_pid).strip()]
     else:
-        req_phone_ids = []
+        req_phone_id = []
     prioridade = bool(data.get("prioridade"))
 
 
