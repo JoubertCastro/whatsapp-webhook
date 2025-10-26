@@ -12,17 +12,37 @@ from typing import Optional, Tuple, List, Dict, Any
 
 app = Flask(__name__)
 
-CARTEIRA_TO_PHONE = {
-    "ConnectZap": ["828473960349364"],
-    "Recovery PJ": ["727586317113885"],
-    "Recovery PF": ["864779140046932", "802977069563598"],
-    "Mercado Pago Cobrança": ["873637622491517", "821562937700669"],
-    "DivZero": ["779797401888141"],
-    "Arc4U": ["829210283602406"],
-    "Serasa": ["713021321904495"],
-    "Mercado Pago Vendas": ["803535039503723"],
-    "Banco PAN": ["805610009301153"],
+
+# Raw mapping (as provided), including possible keys with suffixes like "PF2"
+CARTEIRA_TO_PHONE_RAW = {
+
+    "ConnectZap": "828473960349364",
+    "Recovery PJ": "727586317113885",
+    "Recovery PF": "864779140046932",
+    "Recovery PF2": "802977069563598",
+    "Mercado Pago Cobrança": "873637622491517",
+    "Mercado Pago Cobrança2": "821562937700669",
+    "DivZero": "779797401888141",
+    "Arc4U": "829210283602406",
+    "Serasa": "713021321904495",
+    "Mercado Pago Vendas": "803535039503723",
+    "Banco PAN": "805610009301153",
 }
+
+def _normalize_carteira_key(k: str) -> str:
+    k = (k or "").strip()
+    # collapse keys that have numeric suffixes like "Recovery PF2" -> "Recovery PF"
+    return re.sub(r"\d+$", "", k).strip()
+
+# Build aggregated mapping: carteira -> list of phone_ids
+from collections import defaultdict
+CARTEIRA_TO_PHONE_IDS = defaultdict(list)
+for nome, pid in CARTEIRA_TO_PHONE_RAW.items():
+    base = _normalize_carteira_key(nome)
+    CARTEIRA_TO_PHONE_IDS[base].append(str(pid))
+
+# Freeze as normal dict
+CARTEIRA_TO_PHONE_IDS = dict(CARTEIRA_TO_PHONE_IDS)
 
 ALLOWED_MOTIVOS_CONCLUSAO = [
     "Realizou negociação",
@@ -1062,12 +1082,10 @@ def tickets_claim():
     if not isinstance(codigo, int) or not carteira:
         return jsonify({"ok": False, "erro": "codigo_do_agente (int) e carteira são obrigatórios"}), 400
 
-    phone_id = CARTEIRA_TO_PHONE.get(carteira)
-    if not phone_id:
+    phone_ids = CARTEIRA_TO_PHONE_IDS.get(carteira, [])
+    if not phone_ids:
         return jsonify({"ok": False, "erro": "carteira desconhecida"}), 400
-
-    if req_remetente and not req_phone_id:
-        req_phone_id = phone_id
+    # não force req_phone_id; quando ausente pesquisaremos em todos os phone_ids da carteira
 
     conn = get_conn(); cur = conn.cursor()
     try:
@@ -1272,7 +1290,7 @@ def tickets_claim():
               LEFT JOIN last_in li
                 ON li.telefone = r.telefone AND li.phone_id = r.phone_id
              WHERE r.rn = 1
-               AND r.phone_id = %s
+               AND r.phone_id = ANY(%s::text[])
                AND (r.telefone = %s OR r.telefone_norm = %s)
                AND (CASE WHEN r.status='in'
                          THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
@@ -1282,7 +1300,8 @@ def tickets_claim():
                         AND li.last_in > (tb.bloqueado_at AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'UTC'))
              LIMIT 1
             """
-            cur.execute(sql_check, (req_phone_id, req_remetente, req_remetente))
+            ids_for_search = [req_phone_id] if req_phone_id else phone_ids
+            cur.execute(sql_check, (ids_for_search, req_remetente, req_remetente))
             cand = cur.fetchone()
             if not cand:
                 return jsonify({"ok": False, "erro": "Contato não está na fila desta carteira"}), 404
@@ -1295,7 +1314,7 @@ def tickets_claim():
                     (%s, %s, %s, %s, (SELECT nome FROM agentes WHERE codigo_do_agente=%s))
                     ON CONFLICT (telefone, phone_id) WHERE ended_at IS NULL DO NOTHING
                     RETURNING telefone
-                """, (req_remetente, req_phone_id, carteira, codigo, codigo))
+                """, (req_remetente, cand["phone_id"], carteira, codigo, codigo))
                 got = cur.fetchone()
                 if got:
                     conn.commit()
@@ -1451,7 +1470,7 @@ def tickets_claim():
                         AND li.last_in > (tb.bloqueado_at AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'UTC'))
              ORDER BY (r.status='in') DESC, data_hora DESC
         """
-        cur.execute(sql, (phone_id,))
+        cur.execute(sql, (phone_ids,))
         candidatos = cur.fetchall()
 
         for c in candidatos:
@@ -1463,7 +1482,7 @@ def tickets_claim():
                     (%s, %s, %s, %s, (SELECT nome FROM agentes WHERE codigo_do_agente=%s))
                     ON CONFLICT (telefone, phone_id) WHERE ended_at IS NULL DO NOTHING
                     RETURNING telefone
-                """, (c["remetente"], phone_id, carteira, codigo, codigo))
+                """, (c["remetente"], c["phone_id"], carteira, codigo, codigo))
                 row = cur.fetchone()
                 if row:
                     conn.commit()
@@ -1490,7 +1509,7 @@ def tickets_claim():
                        AND phone_id=%s
                        AND ended_at IS NULL
                      LIMIT 1
-                """, (c["remetente"], c["remetente"], phone_id))
+                """, (c["remetente"], c["remetente"], c["phone_id"]))
                 holder = cur.fetchone()
                 if holder:
                     return jsonify({
@@ -1734,7 +1753,7 @@ def tickets_liberar():
                SET ended_at = NOW()
              WHERE codigo_do_agente = %s
                AND telefone = %s
-               AND phone_id = ANY(%s::text[])
+               AND phone_id = %s
                AND ended_at IS NULL
              RETURNING id
         """, (codigo, telefone, phone_id))
@@ -1773,7 +1792,7 @@ def tickets_concluir():
                SET ended_at = NOW()
              WHERE codigo_do_agente = %s
                AND telefone = %s
-               AND phone_id = ANY(%s::text[])
+               AND phone_id = %s
                AND ended_at IS NULL
         """, (codigo, telefone, phone_id))
 
