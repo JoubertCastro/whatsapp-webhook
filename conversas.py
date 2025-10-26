@@ -1076,8 +1076,15 @@ def tickets_claim():
     carteira = (data.get("carteira") or "").strip()
 
     req_remetente = _normalize_remetente(data.get("remetente") or "")
-    req_phone_id  = (data.get("phone_id") or "").strip()
-    prioridade    = bool(data.get("prioridade"))
+    raw_pid = data.get("phone_id")
+    if isinstance(raw_pid, (list, tuple)):
+        req_phone_ids = [str(x).strip() for x in raw_pid if str(x).strip()]
+    elif raw_pid:
+        req_phone_ids = [str(raw_pid).strip()]
+    else:
+        req_phone_ids = []
+    prioridade = bool(data.get("prioridade"))
+
 
     if not isinstance(codigo, int) or not carteira:
         return jsonify({"ok": False, "erro": "codigo_do_agente (int) e carteira são obrigatórios"}), 400
