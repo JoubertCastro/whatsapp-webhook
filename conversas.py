@@ -1541,7 +1541,7 @@ def tickets_claim():
 def tickets_contagem_por_agente():
     carteira = (request.args.get("carteira") or "").strip()
     conn = get_conn()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = get_conn(); cur = conn.cursor()
     try:
         sql = """
             WITH conversas AS (
