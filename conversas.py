@@ -1734,7 +1734,7 @@ def tickets_liberar():
                SET ended_at = NOW()
              WHERE codigo_do_agente = %s
                AND telefone = %s
-               AND phone_id = %s
+               AND phone_id = ANY(%s::text[])
                AND ended_at IS NULL
              RETURNING id
         """, (codigo, telefone, phone_id))
@@ -1773,7 +1773,7 @@ def tickets_concluir():
                SET ended_at = NOW()
              WHERE codigo_do_agente = %s
                AND telefone = %s
-               AND phone_id = %s
+               AND phone_id = ANY(%s::text[])
                AND ended_at IS NULL
         """, (codigo, telefone, phone_id))
 
