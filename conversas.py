@@ -1490,7 +1490,7 @@ def tickets_claim():
                         "ok": True,
                         "ticket": {
                             "remetente": c["remetente"],
-                            "phone_id": phone_id,
+                            "phone_id": phone_ids,
                             "nome_exibicao": c["nome_exibicao"] or c["remetente"],
                             "mensagem_final": c["mensagem_final"],
                             "data_hora": c["data_hora"].isoformat() if c["data_hora"] else None
