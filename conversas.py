@@ -1144,7 +1144,7 @@ def tickets_claim():
                         regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s,'(?<=^55\\d{2})9','')
                         OR regexp_replace(telefone, '(?<=^55\\d{2})9','') = %s
                        )
-                   AND phone_id=%s
+                   AND phone_id = ANY(%s::text[])
                    AND ended_at IS NULL
                  LIMIT 1
             """, (req_remetente, req_remetente, req_phone_id))
@@ -1490,7 +1490,7 @@ def tickets_claim():
                         "ok": True,
                         "ticket": {
                             "remetente": c["remetente"],
-                            "phone_id": phone_ids,
+                            "phone_id": c["phone_id"],
                             "nome_exibicao": c["nome_exibicao"] or c["remetente"],
                             "mensagem_final": c["mensagem_final"],
                             "data_hora": c["data_hora"].isoformat() if c["data_hora"] else None
