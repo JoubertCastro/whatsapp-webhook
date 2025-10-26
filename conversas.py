@@ -1540,47 +1540,69 @@ def tickets_claim():
 @app.route("/api/tickets/contagem_por_agente", methods=["GET"])
 def tickets_contagem_por_agente():
     carteira = (request.args.get("carteira") or "").strip()
-    conn = get_conn(); cur = conn.cursor()
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # conta tickets ativos direto na tabela leve
         sql = """
-            with conversas as (SELECT
-            a.telefone,
-            a.phone_id,
-            a.carteira,
-            a.codigo_do_agente,
-            a.started_at,
-            (now())-(max(data_hora)) parado
-            FROM conversas_em_andamento a 
-                left join mensagens_avulsas b on a.phone_id = b.phone_id
-                and (a.telefone = b.remetente or a.telefone = b.telefone_norm)
-                and b.status ='enviado'
-            WHERE ended_at IS NULL
-            group by 
-            a.telefone,
-            a.phone_id,
-            a.carteira,
-            a.codigo_do_agente,
-            a.started_at
+            WITH conversas AS (
+                SELECT
+                    a.telefone,
+                    a.phone_id,
+                    a.carteira,
+                    a.codigo_do_agente,
+                    a.started_at,
+                    (NOW() - COALESCE(MAX(b.data_hora), a.started_at)) AS parado
+                FROM conversas_em_andamento a
+                LEFT JOIN mensagens_avulsas b
+                       ON a.phone_id = b.phone_id
+                      AND (a.telefone = b.remetente OR a.telefone = b.telefone_norm)
+                      AND b.status = 'enviado'
+                WHERE a.ended_at IS NULL
+                GROUP BY
+                    a.telefone,
+                    a.phone_id,
+                    a.carteira,
+                    a.codigo_do_agente,
+                    a.started_at
             )
             SELECT
-            codigo_do_agente,
-            carteira,
-            COUNT(*)::int AS qtd,
-            EXTRACT(EPOCH FROM MIN(parado))::int AS tempo_inativo_seconds
-            from conversas
-            where 1=1
-              {}
-              GROUP BY 1,2
-        """.format("AND carteira=%s" if carteira else "")
+                codigo_do_agente,
+                carteira,
+                COUNT(*)::int AS qtd,
+                EXTRACT(EPOCH FROM MIN(parado))::int AS tempo_inativo_seconds
+            FROM conversas
+            WHERE 1=1
+              {filtro}
+            GROUP BY 1,2
+        """.format(filtro="AND carteira = %s" if carteira else "")
+
         cur.execute(sql, (carteira,) if carteira else ())
-        rows = cur.fetchall()
-        mapa = {f"{r['codigo_do_agente']}-{r['carteira']}": r['qtd'] for r in rows}
+        rows = cur.fetchall()  # rows: list[dict]
+
+        # monta o mapa: "codigo-carteira" -> {qtd, tempo_inativo_seconds}
+        mapa = {}
+        for r in rows:
+            key = f"{r['codigo_do_agente']}-{r['carteira']}"
+            qtd = int(r.get('qtd', 0))
+            tis = r.get('tempo_inativo_seconds')
+            try:
+                tis = int(tis) if tis is not None else None
+            except Exception:
+                pass
+            # sempre envia objeto (padrão novo)
+            mapa[key] = {
+                "qtd": qtd,
+                "tempo_inativo_seconds": tis if tis is not None else 0
+            }
+
         return jsonify({"ok": True, "mapa": mapa})
     except Exception as e:
         return jsonify({"ok": False, "erro": str(e)}), 500
     finally:
-        cur.close(); conn.close()
+        try:
+            cur.close()
+        finally:
+            conn.close()
 
 
 @app.route("/api/tickets/minhas", methods=["GET"])
