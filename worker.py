@@ -36,7 +36,7 @@ def _create_pool():
         try:
             return SimpleConnectionPool(
                 minconn=1,
-                maxconn=int(os.getenv("PG_MAXCONN", "8")),
+                maxconn=int(os.getenv("PG_MAXCONN", "80")),
                 dsn=DATABASE_URL,
                 cursor_factory=psycopg2.extras.RealDictCursor
             )
