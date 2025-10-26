@@ -1544,14 +1544,34 @@ def tickets_contagem_por_agente():
     try:
         # conta tickets ativos direto na tabela leve
         sql = """
-          SELECT
+            with conversas as (SELECT
+            a.telefone,
+            a.phone_id,
+            a.carteira,
+            a.codigo_do_agente,
+            a.started_at,
+            (now())-(max(data_hora)) parado
+            FROM conversas_em_andamento a 
+                left join mensagens_avulsas b on a.phone_id = b.phone_id
+                and (a.telefone = b.remetente or a.telefone = b.telefone_norm)
+                and b.status ='enviado'
+            WHERE ended_at IS NULL
+            group by 
+            a.telefone,
+            a.phone_id,
+            a.carteira,
+            a.codigo_do_agente,
+            a.started_at
+            )
+            SELECT
             codigo_do_agente,
             carteira,
-            COUNT(*)::int AS qtd
-          FROM conversas_em_andamento
-          WHERE ended_at IS NULL
-          {}
-          GROUP BY 1,2
+            COUNT(*)::int AS qtd,
+            MIN(Parado)Tempo_inativo
+            from conversas
+            where 1=1
+              {}
+              GROUP BY 1,2
         """.format("AND carteira=%s" if carteira else "")
         cur.execute(sql, (carteira,) if carteira else ())
         rows = cur.fetchall()
