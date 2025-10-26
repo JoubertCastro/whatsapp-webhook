@@ -1,6 +1,17 @@
-web: gunicorn server:app
-worker_envios: python worker.py
-worker_conversas: python conversas.py
-#web: gunicorn server:app --workers ${WEB_WORKERS:-8} --threads ${WEB_THREADS:-1} --bind 0.0.0.0:${PORT:-8080} --timeout ${WEB_TIMEOUT:-60} --graceful-timeout ${WEB_GRACEFUL_TIMEOUT:-30}
-#conversas_web: gunicorn conversas:app --workers ${CONV_WORKERS:-8} --threads ${CONV_THREADS:-1} --bind 0.0.0.0:${CONV_PORT:-8081} --timeout ${CONV_TIMEOUT:-60} --graceful-timeout ${CONV_GRACEFUL_TIMEOUT:-30}
-#orker_envios: python worker.py
+#web: gunicorn server:app
+#worker_envios: python worker.py
+#worker_conversas: python conversas.py
+web: gunicorn server:app \
+  --worker-class gthread \
+  --workers ${WEB_CONCURRENCY:-64} \
+  --threads ${WEB_THREADS:-16} \
+  --timeout ${WEB_TIMEOUT:-90} \
+  --graceful-timeout ${WEB_GRACEFUL_TIMEOUT:-30} \
+  --keep-alive 5 \
+  --max-requests ${WEB_MAX_REQUESTS:-5000} \
+  --max-requests-jitter ${WEB_MAX_REQUESTS_JITTER:-500} \
+  --worker-tmp-dir /dev/shm \
+  --log-level info --access-logfile - --error-logfile -
+
+# Worker de envios (processo sem bind de porta)
+worker_envios: python -u worker.py
