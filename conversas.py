@@ -13,17 +13,15 @@ from typing import Optional, Tuple, List, Dict, Any
 app = Flask(__name__)
 
 CARTEIRA_TO_PHONE = {
-    "ConnectZap": "828473960349364",
-    "Recovery PJ": "727586317113885",
-    "Recovery PF": "864779140046932",
-    "Recovery PF2": "802977069563598",
-    "Mercado Pago Cobrança": "873637622491517",
-    "Mercado Pago Cobrança2": "821562937700669",
-    "DivZero": "779797401888141",
-    "Arc4U": "829210283602406",
-    "Serasa": "713021321904495",
-    "Mercado Pago Vendas": "803535039503723",
-    "Banco PAN": "805610009301153",
+    "ConnectZap": ["828473960349364"],
+    "Recovery PJ": ["727586317113885"],
+    "Recovery PF": ["864779140046932", "802977069563598"],
+    "Mercado Pago Cobrança": ["873637622491517", "821562937700669"],
+    "DivZero": ["779797401888141"],
+    "Arc4U": ["829210283602406"],
+    "Serasa": ["713021321904495"],
+    "Mercado Pago Vendas": ["803535039503723"],
+    "Banco PAN": ["805610009301153"],
 }
 
 ALLOWED_MOTIVOS_CONCLUSAO = [
@@ -1444,7 +1442,7 @@ def tickets_claim():
               LEFT JOIN last_in li
                 ON li.telefone = r.telefone AND li.phone_id = r.phone_id
              WHERE r.rn = 1
-               AND r.phone_id = %s
+               AND r.phone_id = ANY(%s::text[])
                AND (CASE WHEN r.status='in'
                          THEN r.data_hora AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo'
                          ELSE r.data_hora END) >= now() - interval '1 day'
