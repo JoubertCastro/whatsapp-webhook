@@ -1167,7 +1167,7 @@ def tickets_claim():
                                    mensagem AS mensagem_final
                               FROM mensagens
                              WHERE (remetente = %s OR telefone_norm = %s)
-                               AND phone_number_id= %s
+                               AND phone_number_id = ANY(%s::text[])
                              ORDER BY data_hora DESC
                              LIMIT 1
                         )
