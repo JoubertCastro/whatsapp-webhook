@@ -1148,8 +1148,8 @@ def tickets_claim():
                 SELECT codigo_do_agente, nome_agente
                   FROM conversas_em_andamento
                  WHERE (
-                        regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s,'(?<=^55\\d{2})9','')
-                        OR regexp_replace(telefone, '(?<=^55\\d{2})9','') = %s
+                        telefone_norm = regexp_replace(%s,'(?<=^55\\d{2})9','')
+                        OR telefone_norm = %s
                        )
                    AND phone_id = ANY(%s::text[])
                    AND ended_at IS NULL
@@ -1342,8 +1342,8 @@ def tickets_claim():
                     SELECT codigo_do_agente, nome_agente
                       FROM conversas_em_andamento
                      WHERE (
-                            regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s,'(?<=^55\\d{2})9','')
-                            OR regexp_replace(telefone, '(?<=^55\\d{2})9','') = %s
+                            telefone_norm = regexp_replace(%s,'(?<=^55\\d{2})9','')
+                            OR telefone_norm = %s
                            )
                        AND phone_id=%s
                        AND ended_at IS NULL
@@ -1510,8 +1510,8 @@ def tickets_claim():
                     SELECT codigo_do_agente, nome_agente
                       FROM conversas_em_andamento
                      WHERE (
-                            regexp_replace(telefone, '(?<=^55\\d{2})9','') = regexp_replace(%s,'(?<=^55\\d{2})9','')
-                            OR regexp_replace(telefone, '(?<=^55\\d{2})9','') = %s
+                            telefone_norm = regexp_replace(%s,'(?<=^55\\d{2})9','')
+                            OR telefone_norm = %s
                            )
                        AND phone_id=%s
                        AND ended_at IS NULL
